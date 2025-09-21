@@ -35,6 +35,7 @@
 // Include hardware libraries
 #include "hardware/pio.h"
 #include "hardware/dma.h"
+#include "hardware/spi.h"
 #include "hardware/clocks.h"
 #include "hardware/pll.h"
 // Include protothreads
@@ -75,6 +76,10 @@ fix15 boid1_y ;
 fix15 boid1_vx ;
 fix15 boid1_vy ;
 
+// peg on core 0
+fix15 peg0_x = (fix15)320 ;
+fix15 peg0_y = (fix15)240 ;
+
 // Create a boid
 void spawnBoid(fix15* x, fix15* y, fix15* vx, fix15* vy, int direction)
 {
@@ -82,10 +87,15 @@ void spawnBoid(fix15* x, fix15* y, fix15* vx, fix15* vy, int direction)
   *x = int2fix15(320) ;
   *y = int2fix15(240) ;
   // Choose left or right
-  if (direction) *vx = int2fix15(3) ;
-  else *vx = int2fix15(-3) ;
+  if (direction) *vx = int2fix15(0) ;
+  else *vx = int2fix15(0) ;
   // Moving down
-  *vy = int2fix15(1) ;
+  *vy = int2fix15(9) ;
+}
+
+// create a peg
+void spawnPegs() {
+  fillCircle((short)peg0_x, (short)peg0_y, 6, DARK_GREEN) ;
 }
 
 // Draw the boundaries
@@ -122,6 +132,38 @@ void wallsAndEdges(fix15* x, fix15* y, fix15* vx, fix15* vy)
   *y = *y + *vy ;
 }
 
+// detects ball hitting peg, updates velocity and position
+// params are entered for the ball
+void hitPeg(fix15* ball_x, fix15* ball_y, fix15* ball_vx, fix15* ball_vy, fix15* peg_x, fix15* peg_y) {
+  // compute x and y distances between ball and peg
+  fix15 dx = *ball_x - *peg_x ;
+  fix15 dy = *ball_y - *peg_y ;
+
+  // if both x and y distances are less than the collision distances
+  if ((abs(dx) < 4) && (abs(dy) < 10)) {
+    // compute distance sperating ball and peg
+    fix15 distance = sqrt((dx*dx) + (dy*dy));
+
+    // generate the normal vector that points from peg to ball
+    fix15 normal_x = divfix(dx, distance) ;
+    fix15 normal_y = divfix(dy, distance) ;
+
+    // collision physics
+    fix15 imm_term = (fix15)(-2 * (multfix15(normal_x, *ball_vx) + multfix15(normal_y, *ball_vy))) ;
+
+    // are ball velocity and normal vectors in opposite directions?
+    if (imm_term > 0) {
+      // teleport it outside the collision distance with the peg
+      *ball_x = *peg_x + multfix15(normal_x, (distance + 1)) ;
+      *ball_y = *peg_y + multfix15(normal_y, (distance + 1)) ;
+
+      // update the velocity
+      *ball_vx = *ball_vx + multfix15(normal_x, imm_term) ;
+      *ball_vy = *ball_vy + multfix15(normal_y, imm_term) ;
+    }
+  }
+}
+
 // ==================================================
 // === users serial input thread
 // ==================================================
@@ -153,6 +195,45 @@ static PT_THREAD (protothread_serial(struct pt *pt))
   PT_END(pt);
 } // timer thread
 
+// Animation on core 0, animating the ball bouncing on peg
+static PT_THREAD (protothread_anim(struct pt *pt))
+{
+    // Mark beginning of thread
+    PT_BEGIN(pt);
+
+    // Variables for maintaining frame rate
+    static int begin_time ;
+    static int spare_time ;
+
+    // Spawn a boid
+    spawnBoid(&boid0_x, &boid0_y, &boid0_vx, &boid0_vy, 0);
+    spawnPegs() ;
+
+    while(1) {
+      // Measure time at start of thread
+      begin_time = time_us_32() ;
+      // erase boid
+      drawRect(fix2int15(boid0_x), fix2int15(boid0_y), 2, 2, BLACK);
+      // update boid's position and velocity
+      wallsAndEdges(&boid0_x, &boid0_y, &boid0_vx, &boid0_vy) ;
+      hitPeg(&boid0_x, &boid0_y, &boid0_vx, &boid0_vy, &peg0_x, &peg0_y) ;
+      boid0_vy = boid0_vy + 2 ; 
+      boid0_x = boid0_x + boid0_vx ;
+      boid0_y = boid0_y + boid0_vy ;
+      // draw the boid at its new position
+      drawRect(fix2int15(boid0_x), fix2int15(boid0_y), 2, 2, color); 
+      // draw the boundaries
+      drawArena() ;
+      // delay in accordance with frame rate
+      spare_time = FRAME_RATE - (time_us_32() - begin_time) ;
+      // yield for necessary amount of time
+      PT_YIELD_usec(spare_time) ;
+     // NEVER exit while
+    } // END WHILE(1)
+  PT_END(pt);
+} // animation thread
+
+/*
 // Animation on core 0
 static PT_THREAD (protothread_anim(struct pt *pt))
 {
@@ -165,6 +246,7 @@ static PT_THREAD (protothread_anim(struct pt *pt))
 
     // Spawn a boid
     spawnBoid(&boid0_x, &boid0_y, &boid0_vx, &boid0_vy, 0);
+    spawnPegs() ;
 
     while(1) {
       // Measure time at start of thread
@@ -185,7 +267,7 @@ static PT_THREAD (protothread_anim(struct pt *pt))
     } // END WHILE(1)
   PT_END(pt);
 } // animation thread
-
+*/
 
 // Animation on core 1
 static PT_THREAD (protothread_anim1(struct pt *pt))
