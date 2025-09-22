@@ -85,8 +85,8 @@ inline void spawnBall(fix15* x, fix15* y, fix15* vx, fix15* vy) {
   // Generate random float between 0.0 and 1.0 for small initial vx
   float random_float = (float)rand() / (float)RAND_MAX ;
   
-  // Scale float to range of [-0.5, 0.5]
-  float random_vx_float = random_float - 0.5 ;
+  // Scale float to range of [-0.25, 0.25]
+  float random_vx_float = (random_float * 0.4f) - 0.2f ;
   
   // Convert the float to a fixed-point number and assign it to vx
   *vx = float2fix15(random_vx_float) ;
