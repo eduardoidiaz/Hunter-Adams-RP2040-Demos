@@ -1,7 +1,6 @@
-
 /**
  * Hunter Adams (vha3@cornell.edu)
- * 
+ *
  * This demonstration animates two balls bouncing about the screen.
  * Through a serial interface, the user can change the ball color.
  *
@@ -24,6 +23,7 @@
 // Include the VGA grahics library
 #include "vga16_graphics_v2.h"
 // Include standard libraries
+#include <hardware/timer.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -46,11 +46,12 @@ typedef signed int fix15 ;
 #define multfix15(a,b) ((fix15)((((signed long long)(a))*((signed long long)(b)))>>15))
 #define float2fix15(a) ((fix15)((a)*32768.0)) // 2^15
 #define fix2float15(a) ((float)(a)/32768.0)
-#define absfix15(a) abs(a) 
+#define absfix15(a) abs(a)
 #define int2fix15(a) ((fix15)(a << 15))
 #define fix2int15(a) ((int)(a >> 15))
 #define char2fix15(a) (fix15)(((fix15)(a)) << 15)
 #define divfix(a,b) (fix15)(div_s64s64( (((signed long long)(a)) << 15), ((signed long long)(b))))
+#define sqrtfix(a) (float2fix15(sqrt(fix2float15(a))))
 
 // Wall detection
 #define hitBottom(b) (b>int2fix15(380))
@@ -61,45 +62,47 @@ typedef signed int fix15 ;
 // uS per frame
 #define FRAME_RATE 33000
 
-// the color of the boid
+// the color of the balls
 char color = WHITE ;
 
-// Boid on core 0
-fix15 boid0_x ;
-fix15 boid0_y ;
-fix15 boid0_vx ;
-fix15 boid0_vy ;
-
-// Boid on core 1
-fix15 boid1_x ;
-fix15 boid1_y ;
-fix15 boid1_vx ;
-fix15 boid1_vy ;
+// balls
+fix15 ball0_x ;
+fix15 ball0_y ;
+fix15 ball0_vx ;
+fix15 ball0_vy ;
+short ball_r = 4 ; // radius
 
 // peg on core 0
-fix15 peg0_x = (fix15)320 ;
-fix15 peg0_y = (fix15)240 ;
+fix15 peg0_x = int2fix15(320) ;
+fix15 peg0_y = int2fix15(240) ;
 
-// Create a boid
-void spawnBoid(fix15* x, fix15* y, fix15* vx, fix15* vy, int direction)
-{
+// create a ball (inline makes it run faster)
+inline void spawnBall(fix15* x, fix15* y, fix15* vx, fix15* vy) {
   // Start in center of screen
   *x = int2fix15(320) ;
-  *y = int2fix15(240) ;
-  // Choose left or right
-  if (direction) *vx = int2fix15(0) ;
-  else *vx = int2fix15(0) ;
+  *y = int2fix15(120) ;
+
+  // Generate random float between 0.0 and 1.0 for small initial vx
+  float random_float = (float)rand() / (float)RAND_MAX ;
+  
+  // Scale float to range of [-0.5, 0.5]
+  float random_vx_float = random_float - 0.5 ;
+  
+  // Convert the float to a fixed-point number and assign it to vx
+  *vx = float2fix15(random_vx_float) ;
+
   // Moving down
-  *vy = int2fix15(9) ;
+  *vy = int2fix15(0) ;
 }
 
 // create a peg
-void spawnPegs() {
-  fillCircle((short)peg0_x, (short)peg0_y, 6, DARK_GREEN) ;
+inline void spawnPegs() {
+  fillCircle(fix2int15(peg0_x), fix2int15(peg0_y), 6, DARK_GREEN) ;
+  // to generate a filled circle
 }
 
 // Draw the boundaries
-void drawArena() {
+inline void drawArena() {
   drawVLine(100, 100, 280, WHITE) ;
   drawVLine(540, 100, 280, WHITE) ;
   drawHLine(100, 100, 440, WHITE) ;
@@ -107,7 +110,7 @@ void drawArena() {
 }
 
 // Detect wallstrikes, update velocity and position
-void wallsAndEdges(fix15* x, fix15* y, fix15* vx, fix15* vy)
+inline void wallsAndEdges(fix15* x, fix15* y, fix15* vx, fix15* vy)
 {
   // Reverse direction if we've hit a wall
   if (hitTop(*y)) {
@@ -115,9 +118,8 @@ void wallsAndEdges(fix15* x, fix15* y, fix15* vx, fix15* vy)
     *y  = (*y + int2fix15(5)) ;
   }
   if (hitBottom(*y)) {
-    *vy = (-*vy) ;
-    *y  = (*y - int2fix15(5)) ;
-  } 
+    spawnBall(x, y, vx, vy) ; 
+  }
   if (hitRight(*x)) {
     *vx = (-*vx) ;
     *x  = (*x - int2fix15(5)) ;
@@ -125,42 +127,38 @@ void wallsAndEdges(fix15* x, fix15* y, fix15* vx, fix15* vy)
   if (hitLeft(*x)) {
     *vx = (-*vx) ;
     *x  = (*x + int2fix15(5)) ;
-  } 
+  }
 
   // Update position using velocity
   *x = *x + *vx ;
   *y = *y + *vy ;
 }
 
-// detects ball hitting peg, updates velocity and position
-// params are entered for the ball
+
 void hitPeg(fix15* ball_x, fix15* ball_y, fix15* ball_vx, fix15* ball_vy, fix15* peg_x, fix15* peg_y) {
-  // compute x and y distances between ball and peg
+  // because this is the ball radius + peg radius (6 + 4 = 10), 
+  // required to see if the x and y distances are less than the collision distance
+  static const fix15 collision_dist_sq = float2fix15(100.0) ; 
+  // computing difference in position
   fix15 dx = *ball_x - *peg_x ;
   fix15 dy = *ball_y - *peg_y ;
+  fix15 dist_sq = multfix15(dx, dx) + multfix15(dy, dy) ;
+  // reduces the 
+  if (dist_sq < collision_dist_sq) {
+     fix15 distance = sqrtfix(dist_sq) ;
+     fix15 normal_x = divfix(dx, distance) ;
+     fix15 normal_y = divfix(dy, distance) ;
+     fix15 imm_term = (fix15)(-2 * (multfix15(normal_x, *ball_vx) + multfix15(normal_y, *ball_vy))) ;
+     
+     if (imm_term > 0) {
+       *ball_vx = *ball_vx + multfix15(normal_x, imm_term) ;
+       *ball_vy = *ball_vy + multfix15(normal_y, imm_term) ;
 
-  // if both x and y distances are less than the collision distances
-  if ((abs(dx) < 4) && (abs(dy) < 10)) {
-    // compute distance sperating ball and peg
-    fix15 distance = sqrt((dx*dx) + (dy*dy));
+       fix15 move_out_dist = distance + int2fix15(1) ; // need to randomize for the binomial distribution right or left
 
-    // generate the normal vector that points from peg to ball
-    fix15 normal_x = divfix(dx, distance) ;
-    fix15 normal_y = divfix(dy, distance) ;
-
-    // collision physics
-    fix15 imm_term = (fix15)(-2 * (multfix15(normal_x, *ball_vx) + multfix15(normal_y, *ball_vy))) ;
-
-    // are ball velocity and normal vectors in opposite directions?
-    if (imm_term > 0) {
-      // teleport it outside the collision distance with the peg
-      *ball_x = *peg_x + multfix15(normal_x, (distance + 1)) ;
-      *ball_y = *peg_y + multfix15(normal_y, (distance + 1)) ;
-
-      // update the velocity
-      *ball_vx = *ball_vx + multfix15(normal_x, imm_term) ;
-      *ball_vy = *ball_vy + multfix15(normal_y, imm_term) ;
-    }
+       *ball_x = *peg_x + multfix15(normal_x, move_out_dist) ;
+       *ball_y = *peg_y + multfix15(normal_y, move_out_dist) ;
+     }
   }
 }
 
@@ -206,24 +204,32 @@ static PT_THREAD (protothread_anim(struct pt *pt))
     static int spare_time ;
 
     // Spawn a boid
-    spawnBoid(&boid0_x, &boid0_y, &boid0_vx, &boid0_vy, 0);
+    spawnBall(&ball0_x, &ball0_y, &ball0_vx, &ball0_vy) ;
     spawnPegs() ;
 
     while(1) {
       // Measure time at start of thread
       begin_time = time_us_32() ;
-      // erase boid
-      drawRect(fix2int15(boid0_x), fix2int15(boid0_y), 2, 2, BLACK);
-      // update boid's position and velocity
-      wallsAndEdges(&boid0_x, &boid0_y, &boid0_vx, &boid0_vy) ;
-      hitPeg(&boid0_x, &boid0_y, &boid0_vx, &boid0_vy, &peg0_x, &peg0_y) ;
-      boid0_vy = boid0_vy + 2 ; 
-      boid0_x = boid0_x + boid0_vx ;
-      boid0_y = boid0_y + boid0_vy ;
-      // draw the boid at its new position
-      drawRect(fix2int15(boid0_x), fix2int15(boid0_y), 2, 2, color); 
-      // draw the boundaries
+      
+      // erase ball at old position
+      fillCircle(fix2int15(ball0_x), fix2int15(ball0_y), 4, BLACK) ;
+
+      // Redraw background
+      spawnPegs() ;
       drawArena() ;
+
+      // Apply gravity to the ball
+      ball0_vy = ball0_vy + float2fix15(0.1) ;
+
+      // Update the walls and edges, and handle wall collisions
+      wallsAndEdges(&ball0_x, &ball0_y, &ball0_vx, &ball0_vy) ;
+
+      // update ball's position and velocity
+      hitPeg(&ball0_x, &ball0_y, &ball0_vx, &ball0_vy, &peg0_x, &peg0_y) ;
+
+      // draw the ball at its new position
+      fillCircle(fix2int15(ball0_x), fix2int15(ball0_y), 4, color) ;
+
       // delay in accordance with frame rate
       spare_time = FRAME_RATE - (time_us_32() - begin_time) ;
       // yield for necessary amount of time
@@ -232,84 +238,6 @@ static PT_THREAD (protothread_anim(struct pt *pt))
     } // END WHILE(1)
   PT_END(pt);
 } // animation thread
-
-/*
-// Animation on core 0
-static PT_THREAD (protothread_anim(struct pt *pt))
-{
-    // Mark beginning of thread
-    PT_BEGIN(pt);
-
-    // Variables for maintaining frame rate
-    static int begin_time ;
-    static int spare_time ;
-
-    // Spawn a boid
-    spawnBoid(&boid0_x, &boid0_y, &boid0_vx, &boid0_vy, 0);
-    spawnPegs() ;
-
-    while(1) {
-      // Measure time at start of thread
-      begin_time = time_us_32() ;      
-      // erase boid
-      drawRect(fix2int15(boid0_x), fix2int15(boid0_y), 2, 2, BLACK);
-      // update boid's position and velocity
-      wallsAndEdges(&boid0_x, &boid0_y, &boid0_vx, &boid0_vy) ;
-      // draw the boid at its new position
-      drawRect(fix2int15(boid0_x), fix2int15(boid0_y), 2, 2, color); 
-      // draw the boundaries
-      drawArena() ;
-      // delay in accordance with frame rate
-      spare_time = FRAME_RATE - (time_us_32() - begin_time) ;
-      // yield for necessary amount of time
-      PT_YIELD_usec(spare_time) ;
-     // NEVER exit while
-    } // END WHILE(1)
-  PT_END(pt);
-} // animation thread
-*/
-
-// Animation on core 1
-static PT_THREAD (protothread_anim1(struct pt *pt))
-{
-    // Mark beginning of thread
-    PT_BEGIN(pt);
-
-    // Variables for maintaining frame rate
-    static int begin_time ;
-    static int spare_time ;
-
-    // Spawn a boid
-    spawnBoid(&boid1_x, &boid1_y, &boid1_vx, &boid1_vy, 1);
-
-    while(1) {
-      // Measure time at start of thread
-      begin_time = time_us_32() ;      
-      // erase boid
-      drawRect(fix2int15(boid1_x), fix2int15(boid1_y), 2, 2, BLACK);
-      // update boid's position and velocity
-      wallsAndEdges(&boid1_x, &boid1_y, &boid1_vx, &boid1_vy) ;
-      // draw the boid at its new position
-      drawRect(fix2int15(boid1_x), fix2int15(boid1_y), 2, 2, color); 
-      // delay in accordance with frame rate
-      spare_time = FRAME_RATE - (time_us_32() - begin_time) ;
-      // yield for necessary amount of time
-      PT_YIELD_usec(spare_time) ;
-     // NEVER exit while
-    } // END WHILE(1)
-  PT_END(pt);
-} // animation thread
-
-// ========================================
-// === core 1 main -- started in main below
-// ========================================
-void core1_main(){
-  // Add animation thread
-  pt_add_thread(protothread_anim1);
-  // Start the scheduler
-  pt_schedule_start ;
-
-}
 
 // ========================================
 // === main
@@ -323,9 +251,12 @@ int main(){
   // initialize VGA
   initVGA() ;
 
-  // start core 1 
-  multicore_reset_core1();
-  multicore_launch_core1(&core1_main);
+  // Seed random number gen
+  srand(time_us_32()) ;
+
+  // start core 1
+  //multicore_reset_core1();
+  //multicore_launch_core1(&core1_main);
 
   // add threads
   pt_add_thread(protothread_serial);
@@ -333,4 +264,4 @@ int main(){
 
   // start scheduler
   pt_schedule_start ;
-} 
+}
