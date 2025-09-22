@@ -62,6 +62,27 @@ typedef signed int fix15 ;
 // uS per frame
 #define FRAME_RATE 33000
 
+// SPI configs for the DAC
+#define PIN_CS   5
+#define PIN_SCK  6
+#define PIN_MOSI 7
+#define SPI_PORT spi0
+
+// Samples per period in sine table
+#define SINE_TABLE_SIZE 256
+
+// Sine table and DAC data table
+int raw_sin[SINE_TABLE_SIZE] ;
+unsigned short dac_data[SINE_TABLE_SIZE] ;
+unsigned short* addr_pointer = &dac_data[0] ;
+
+// DAC config bits (channel A, 1x gain, active)
+#define DAC_CONFIG_CHAN_A 0b0011000000000000 
+
+// DMA channel vars
+int data_chan ;
+int ctrl_chan ;
+
 // the color of the balls
 char color = WHITE ;
 
@@ -76,6 +97,67 @@ short ball_r = 4 ; // radius
 fix15 peg0_x = int2fix15(320) ;
 fix15 peg0_y = int2fix15(240) ;
 
+static inline void audio_init() {
+  // Init/config SPI
+  spi_init(SPI_PORT, 20000000) ;
+  spi_set_format(SPI_PORT, 16, 0, 0, 0) ;
+  gpio_set_function(PIN_CS, GPIO_FUNC_SPI) ;
+  gpio_set_function(PIN_SCK, GPIO_FUNC_SPI) ;
+  gpio_set_function(PIN_MOSI, GPIO_FUNC_SPI);
+
+  // Build the sine wave and DAC data tables
+  for (int i = 0; i < SINE_TABLE_SIZE; i++) {
+    // 12 bit sine wave, in range [0, 4095]
+    raw_sin[i] = (int)(2047 * sin((float)i*6.383f / (float)SINE_TABLE_SIZE) + 2047) ;
+    
+    // Mask sine wave with config bits into dac_data
+    dac_data[i] = DAC_CONFIG_CHAN_A | (raw_sin[i] & 0x0fff) ;
+
+  }
+  
+  // Claim two DMA channels
+  data_chan = dma_claim_unused_channel(true) ;
+  ctrl_chan = dma_claim_unused_channel(true) ;
+
+  // Configure the control channel
+  // write the starting address of sound data into data channel's read address register
+  dma_channel_config ctrl_conf = dma_channel_get_default_config(ctrl_chan) ;
+  channel_config_set_transfer_data_size(&ctrl_conf, DMA_SIZE_32) ;
+  channel_config_set_read_increment(&ctrl_conf, false) ;
+  channel_config_set_write_increment(&ctrl_conf, false) ;
+  channel_config_set_chain_to(&ctrl_conf, data_chan) ; //trigger data_chan when done
+
+  dma_channel_configure(
+    ctrl_chan, &ctrl_conf, 
+    &dma_hw->ch[data_chan].read_addr, // write addr
+    &addr_pointer, // read addr
+    1, false
+  ) ;
+
+  // configure the data channel, to stream data to spi port
+  dma_channel_config data_conf = dma_channel_get_default_config(data_chan) ;
+  channel_config_set_transfer_data_size(&data_conf, DMA_SIZE_16) ;
+  channel_config_set_read_increment(&data_conf, true) ;
+  channel_config_set_write_increment(&data_conf, false) ;
+  channel_config_set_dreq(&data_conf, spi_get_dreq(SPI_PORT, true)) ; // keep pace wth spi
+
+  dma_channel_configure(
+    data_chan, &data_conf, 
+    &spi_get_hw(SPI_PORT)->dr,
+    dac_data,
+    SINE_TABLE_SIZE, 
+    false
+  ) ;
+}
+
+static inline void play_hit_sound() {
+  // only play if channels clear
+  if (dma_channel_is_busy(data_chan) || dma_channel_is_busy(ctrl_chan)) {
+    return ;
+  }
+  dma_channel_start(ctrl_chan) ;
+}
+
 // create a ball (inline makes it run faster)
 inline void spawnBall(fix15* x, fix15* y, fix15* vx, fix15* vy) {
   // Start in center of screen
@@ -85,7 +167,7 @@ inline void spawnBall(fix15* x, fix15* y, fix15* vx, fix15* vy) {
   // Generate random float between 0.0 and 1.0 for small initial vx
   float random_float = (float)rand() / (float)RAND_MAX ;
   
-  // Scale float to range of [-0.25, 0.25]
+  // Scale float to range of [-0.2, 0.2]
   float random_vx_float = (random_float * 0.4f) - 0.2f ;
   
   // Convert the float to a fixed-point number and assign it to vx
@@ -135,7 +217,7 @@ inline void wallsAndEdges(fix15* x, fix15* y, fix15* vx, fix15* vy)
 }
 
 
-void hitPeg(fix15* ball_x, fix15* ball_y, fix15* ball_vx, fix15* ball_vy, fix15* peg_x, fix15* peg_y) {
+static inline void hitPeg(fix15* ball_x, fix15* ball_y, fix15* ball_vx, fix15* ball_vy, fix15* peg_x, fix15* peg_y) {
   // because this is the ball radius + peg radius (6 + 4 = 10), 
   // required to see if the x and y distances are less than the collision distance
   static const fix15 collision_dist_sq = float2fix15(100.0) ; 
@@ -145,19 +227,20 @@ void hitPeg(fix15* ball_x, fix15* ball_y, fix15* ball_vx, fix15* ball_vy, fix15*
   fix15 dist_sq = multfix15(dx, dx) + multfix15(dy, dy) ;
   // reduces the 
   if (dist_sq < collision_dist_sq) {
-     fix15 distance = sqrtfix(dist_sq) ;
-     fix15 normal_x = divfix(dx, distance) ;
-     fix15 normal_y = divfix(dy, distance) ;
-     fix15 imm_term = (fix15)(-2 * (multfix15(normal_x, *ball_vx) + multfix15(normal_y, *ball_vy))) ;
-     
-     if (imm_term > 0) {
-       *ball_vx = *ball_vx + multfix15(normal_x, imm_term) ;
-       *ball_vy = *ball_vy + multfix15(normal_y, imm_term) ;
+    play_hit_sound() ;
+    fix15 distance = sqrtfix(dist_sq) ;
+    fix15 normal_x = divfix(dx, distance) ;
+    fix15 normal_y = divfix(dy, distance) ;
+    fix15 imm_term = (fix15)(-2 * (multfix15(normal_x, *ball_vx) + multfix15(normal_y, *ball_vy))) ;
+    
+    if (imm_term > 0) {
+      *ball_vx = *ball_vx + multfix15(normal_x, imm_term) ;
+      *ball_vy = *ball_vy + multfix15(normal_y, imm_term) ;
 
-       fix15 move_out_dist = distance + int2fix15(1) ; // need to randomize for the binomial distribution right or left
+      fix15 move_out_dist = distance + int2fix15(1) ; // need to randomize for the binomial distribution right or left
 
-       *ball_x = *peg_x + multfix15(normal_x, move_out_dist) ;
-       *ball_y = *peg_y + multfix15(normal_y, move_out_dist) ;
+      *ball_x = *peg_x + multfix15(normal_x, move_out_dist) ;
+      *ball_y = *peg_y + multfix15(normal_y, move_out_dist) ;
      }
   }
 }
@@ -203,7 +286,7 @@ static PT_THREAD (protothread_anim(struct pt *pt))
     static int begin_time ;
     static int spare_time ;
 
-    // Spawn a boid
+    // Spawn a ball
     spawnBall(&ball0_x, &ball0_y, &ball0_vx, &ball0_vy) ;
     spawnPegs() ;
 
@@ -247,6 +330,9 @@ int main(){
   set_sys_clock_khz(150000, true) ;
   // initialize stio
   stdio_init_all() ;
+
+  // setup audio
+  audio_init();
 
   // initialize VGA
   initVGA() ;
