@@ -24,6 +24,7 @@
 #include "vga16_graphics_v2.h"
 // Include standard libraries
 #include <hardware/timer.h>
+#include <pico/error.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -69,7 +70,7 @@ typedef signed int fix15 ;
 #define GRAVITY_FRACTION 0.75
 
 // BOUNCINESS
-#define BOUNCINESS 0.9
+#define BOUNCINESS 0.67
 
 // SPI configs for the DAC
 #define PIN_CS   5
@@ -102,22 +103,45 @@ fix15 ball0_x ;
 fix15 ball0_y ;
 fix15 ball0_vx ;
 fix15 ball0_vy ;
-#define BALL_R  2 // BALL RADIUS
+#define BALL_R  4 // BALL RADIUS
+#define NUM_BALLS 10
+int curr_balls = 0 ;
+int fallen_balls = 0 ;
+char curr_balls_buffer[20] ; // buffer for snprintf 
+char fallen_balls_buffer[20] ;
 
 // peg on core 0
-#define PEG_R 3 // peg radius
+#define PEG_R 6 // peg radius
 #define PEG_OFFSET 40
-fix15 peg0_x = int2fix15(BALL_SPAWN_X) ;
-fix15 peg0_y = int2fix15(BALL_SPAWN_Y + PEG_OFFSET) ;
+
+// top peg coords
+fix15 peg0_x = int2fix15(320) ;
+fix15 peg0_y = int2fix15(100) ;
 
 // sum of squares for collisions
 #define R_SUM_SQ int2fix15((BALL_R + PEG_R) * (BALL_R + PEG_R))
 
-// strings for VGA display
-// char curr_num = "Current number of balls being animated: " ;
-// char total_fallen = "Total number of balls that have fallen through the board since reset: " ;
-// char time = "Time since reset: " ;
+// timing variables
+static uint32_t begin_time ;
+static uint32_t global_start_time_us;   // When the timer started
 
+struct ball {
+  fix15 x ;
+  fix15 y ;
+  fix15 vx ;
+  fix15 vy ;
+  int pegs_hit[136] ;
+} ;
+
+struct peg {
+  fix15 x ;
+  fix15 y ;
+} ;
+
+struct peg pegs[136] ;
+struct ball balls[NUM_BALLS] ;
+
+// make the thunk noise
 static inline void audio_init() {
   // Init/config SPI
   spi_init(SPI_PORT, 20000000) ;
@@ -170,7 +194,7 @@ static inline void audio_init() {
     false
   ) ;
 }
-
+ // play the sound (see if the channels are available)
 static inline void play_hit_sound() {
   // only play if channels clear
   if (dma_channel_is_busy(data_chan) || dma_channel_is_busy(ctrl_chan)) {
@@ -179,12 +203,27 @@ static inline void play_hit_sound() {
   dma_channel_start(ctrl_chan) ;
 }
 
-// create a ball (inline makes it run faster)
-static inline void spawnBall(fix15* x, fix15* y, fix15* vx, fix15* vy) {
-  // Start in center of screen
-  *x = int2fix15(BALL_SPAWN_X) ;
-  *y = int2fix15(BALL_SPAWN_Y) ;
+static inline void init_balls() {
+  for (int i = 0; i < NUM_BALLS; i++)  {
+    balls[i].x = BALL_SPAWN_X ;
+    balls[i].y = BALL_SPAWN_Y ;
+    balls[i].vx = 0 ;
+    balls[i].vy = 0 ;
+    for (int j = 0; j < 136; j++) {
+      balls[i].pegs_hit[j] = 0 ;
+    }
+  }
+}
 
+// create a ball (inline makes it run faster)
+static inline void spawnBall(short ball_idx) {
+  // Start in center of screen
+  balls[ball_idx].x = int2fix15(BALL_SPAWN_X) ;
+  balls[ball_idx].y = int2fix15(BALL_SPAWN_Y) ;
+  for (int peg = 0; peg < 136; peg++) {
+  balls[ball_idx].pegs_hit[peg] = 0 ;
+  }
+  
   // Generate random float between 0.0 and 1.0 for small initial vx
   float random_float = (float)rand() / (float)RAND_MAX ;
   
@@ -192,13 +231,13 @@ static inline void spawnBall(fix15* x, fix15* y, fix15* vx, fix15* vy) {
   float random_vx_float = (random_float * 0.4f) - 0.2f ;
   
   // Convert the float to a fixed-point number and assign it to vx
-  *vx = float2fix15(random_vx_float) ;
+  balls[ball_idx].vx = float2fix15(random_vx_float) ;
 
   // Moving down
-  *vy = int2fix15(0) ;
+  balls[ball_idx].vy = int2fix15(0) ;
 }
 
-// create the grid
+// create the galton board pegs
 static inline void generateBoard() {
   int rows = 16;
   fix15 xi = peg0_x ;
@@ -211,6 +250,9 @@ static inline void generateBoard() {
   for (int i = 0; i < rows; i++) {
     yi = peg0_y + multfix15(int2fix15(i), dy) ; // move the row down based on the first row
 
+    // add the peg to the pegs array
+    pegs[i].y = yi ;
+
     for (int j = 0; j <= i; j++) {
       if (i % 2 == 0) { // even rows, the logic is ok
         x_new = xi - multfix15(int2fix15(i), dx_half) + multfix15(int2fix15(j), dx) ; // start from left most peg, then draw pegs to the right until 
@@ -218,6 +260,7 @@ static inline void generateBoard() {
       else { // odd row
         x_new = xi - multfix15(int2fix15(i), dx_half) + multfix15(int2fix15(j), dx) ; // start from left most peg, then draw pegs to the right until 
       }
+      pegs[i].x = x_new ;
       fillCircle(fix2int15(x_new), fix2int15(yi), PEG_R, DARK_GREEN) ; // draws the pegs for every row
     }
   }
@@ -232,28 +275,30 @@ static inline void drawArena() {
 }
 
 // Detect wallstrikes, update velocity and position
-static inline void wallsAndEdges(fix15* x, fix15* y, fix15* vx, fix15* vy)
+static inline void wallsAndEdges(short ball_idx)
 {
   // Reverse direction if we've hit a wall
-  if (hitTop(*y)) {
-    *vy = BOUNCINESS * (-*vy) ;
-    *y  = (*y + int2fix15(5)) ;
+  if (hitTop(balls[ball_idx].y)) {
+    balls[ball_idx].vy = BOUNCINESS * (-balls[ball_idx].vy) ;
+    balls[ball_idx].y  = (balls[ball_idx].y + int2fix15(5)) ;
   }
-  if (hitBottom(*y)) {
-    spawnBall(x, y, vx, vy) ; 
+  if (hitBottom(balls[ball_idx].y)) {
+    spawnBall(ball_idx) ; 
+    curr_balls -= 1 ;
+    fallen_balls += 1 ;
   }
-  if (hitRight(*x)) {
-    *vx = BOUNCINESS * (-*vx) ;
-    *x  = (*x - int2fix15(5)) ;
+  if (hitRight(balls[ball_idx].x)) {
+    balls[ball_idx].vx = BOUNCINESS * (-balls[ball_idx].vx) ;
+    balls[ball_idx].x  = (balls[ball_idx].x - int2fix15(5)) ;
   }
-  if (hitLeft(*x)) {
-    *vx = (-*vx) ;
-    *x  = (*x + int2fix15(5)) ;
+  if (hitLeft(balls[ball_idx].x)) {
+    balls[ball_idx].vx = (-balls[ball_idx].vx) ;
+    balls[ball_idx].x  = (balls[ball_idx].x + int2fix15(5)) ;
   }
 
   // Update position using velocity
-  *x = *x + *vx ;
-  *y = *y + *vy ;
+  balls[ball_idx].x += balls[ball_idx].vx ;
+  balls[ball_idx].y += balls[ball_idx].vy ;
 }
 
 static inline void hitPeg(fix15* ball_x, fix15* ball_y, fix15* ball_vx, fix15* ball_vy, fix15* peg_x, fix15* peg_y) {
@@ -272,18 +317,28 @@ static inline void hitPeg(fix15* ball_x, fix15* ball_y, fix15* ball_vx, fix15* b
     fix15 imm_term = (fix15)(-2 * (multfix15(normal_x, *ball_vx) + multfix15(normal_y, *ball_vy))) ;
     
     if (imm_term > 0) {
+
+      // insert logic to determine if we hit a new peg
+      
+      *ball_vx = *ball_vx + ( BOUNCINESS * multfix15(normal_x, imm_term) ) ;
+      *ball_vy = *ball_vy +( BOUNCINESS * multfix15(normal_y, imm_term) ) ;
       
       fix15 move_out_dist = distance + int2fix15(1) ;
 
       *ball_x = *peg_x + multfix15(normal_x, move_out_dist) ;
       *ball_y = *peg_y + multfix15(normal_y, move_out_dist) ;
 
-      // insert logic to determine if we hit a new peg
       
-      *ball_vx = *ball_vx + ( BOUNCINESS * multfix15(normal_x, imm_term) ) ;
-      *ball_vy = *ball_vy +( BOUNCINESS * multfix15(normal_y, imm_term) ) ;
      }
+
+     // track that this ball has hit this thingy
+     balls[0].pegs_hit[0] = 1 ;
   }
+}
+
+// timer function to start the timer at boot
+void initTimer() {
+  global_start_time_us = time_us_32();
 }
 
 // ==================================================
@@ -328,23 +383,34 @@ static PT_THREAD (protothread_anim(struct pt *pt))
     PT_BEGIN(pt);
 
     // Variables for maintaining frame rate
-    static int begin_time ;
     static int spare_time ;
 
     // Spawn a ball
-    spawnBall(&ball0_x, &ball0_y, &ball0_vx, &ball0_vy) ;
+    spawnBall(0) ;
+    curr_balls += 1 ; // increment number of balls
     // spawn the board
     generateBoard() ;
 
-    // Generate the text for the screen
-    // writeString(char *str) ;
-    setCursor(30, 30);
-    se
-
+    // initialize the VGA text
+    setTextColor(WHITE) ;
+    setTextSize(1) ;
 
     while(1) {
       // Measure time at start of thread
       begin_time = time_us_32() ;
+
+      // Generate the text for the screen
+      // writeString(char *str) ;
+      setCursor(30, 40);
+      writeString("Balls on screen: ") ;
+      snprintf(curr_balls_buffer, 20, "%d", curr_balls); // converts int to string
+      writeString(curr_balls_buffer) ;
+      setCursor(30, 50);
+      writeString("Balls fallen through: ") ;
+      snprintf(fallen_balls_buffer, 20, "%d", fallen_balls); // converts int to string
+      writeString(fallen_balls_buffer) ;
+      setCursor(30, 60);
+      writeString("Time: ") ;
       
       // erase ball at old position
       fillCircle(fix2int15(ball0_x), fix2int15(ball0_y), BALL_R, BLACK) ;
@@ -356,12 +422,16 @@ static PT_THREAD (protothread_anim(struct pt *pt))
       // Apply gravity to the ball
       ball0_vy = ball0_vy + float2fix15(GRAVITY_FRACTION) ;
 
-      // Update the walls and edges, and handle wall collisions
-      wallsAndEdges(&ball0_x, &ball0_y, &ball0_vx, &ball0_vy) ;
-
       // update ball's position and velocity
       // need to do for every ball, then for every peg... nested for loops???
-      hitPeg(&ball0_x, &ball0_y, &ball0_vx, &ball0_vy, &peg0_x, &peg0_y) ;
+      for (int ball = 0; ball < NUM_BALLS; ball++) {
+        for (int peg = 0; peg < 136; peg++) {
+          hitPeg(&balls[ball].x, &balls[ball].y, &ball0_vx, &ball0_vy, &peg0_x, &peg0_y) ;
+        }
+      }
+
+      // Update the walls and edges, and handle wall collisions
+      wallsAndEdges(0) ;
 
       // draw the ball at its new position
       fillCircle(fix2int15(ball0_x), fix2int15(ball0_y), BALL_R, color) ;
@@ -375,6 +445,21 @@ static PT_THREAD (protothread_anim(struct pt *pt))
   PT_END(pt);
 } // animation thread
 
+// timer thread (just for extracting the timing part)
+// static PT_THREAD (protothread_timer(struct pt *pt)) {
+//   // Mark beginning of thread
+//     PT_BEGIN(pt);
+
+//     begin_time = time_us_32() ;
+
+//     while(1) {
+
+//     }
+
+//     PT_END(pt);
+// }
+
+
 // ========================================
 // === Core 1 entry
 // ========================================
@@ -384,6 +469,7 @@ void core1_entry() {
 
   // Add serial input thread to core1 scheduler
   pt_add_thread(protothread_serial) ;
+  //pt_add_thread(protothread_timer) ;
 
   // start scheduler on core1
   pt_schedule_start ;
@@ -412,6 +498,13 @@ int main(){
 
   // Seed random number gen
   srand(time_us_32()) ;
+
+  // timer for the VGA text on screen
+  //uint64_t start_time = time_us_64();
+  
+  // initialize balls and pegs
+  init_balls() ;
+
   
   // get sum of squares for collision detect
   // Sum squares for ball/peg
