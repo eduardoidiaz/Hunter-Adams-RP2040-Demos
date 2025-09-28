@@ -106,7 +106,7 @@ char color = RED ;
 #define BALL_SPAWN_X 320
 #define BALL_SPAWN_Y 50
 #define BALL_R  4 // BALL RADIUS
-#define MAX_BALLS 200 
+#define MAX_BALLS 690 
 volatile uint active_balls = 1 ;
 int fallen_balls = 0 ;
 char active_balls_buffer[20] ; // buffer for snprintf 
@@ -459,8 +459,6 @@ static PT_THREAD (protothread_anim(struct pt *pt))
         else {
           balls[ball].x = int2fix15(BALL_SPAWN_X) ;
           balls[ball].y = int2fix15(BALL_SPAWN_Y) ;
-          balls[ball].vx = int2fix15(0) ;
-          balls[ball].vy = int2fix15(0) ;
           balls[ball].last_peg = -1 ;
         }
       }
