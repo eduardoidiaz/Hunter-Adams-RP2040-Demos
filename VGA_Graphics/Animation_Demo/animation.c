@@ -24,6 +24,7 @@
 // Include the VGA grahics library
 #include "vga16_graphics_v2.h"
 // Include standard libraries
+#include <hardware/gpio.h>
 #include <hardware/timer.h>
 #include <hardware/adc.h>
 #include <pico/error.h>
@@ -65,6 +66,9 @@ typedef signed int fix15 ;
 // uS per frame
 #define FRAME_RATE 33000
 
+// clock speed
+#define CLOCK_SPEED 250000
+
 // lED PIN
 #define LED 25
 
@@ -105,13 +109,12 @@ char color = RED ;
 // balls
 #define BALL_SPAWN_X 320
 #define BALL_SPAWN_Y 50
-#define BALL_R  4 // BALL RADIUS
-#define MAX_BALLS 690 
+#define BALL_R  1 // BALL RADIUS
+#define MAX_BALLS 2000 
 volatile uint active_balls = 1 ;
 int fallen_balls = 0 ;
 char active_balls_buffer[20] ; // buffer for snprintf 
 char fallen_balls_buffer[20] ;
-
 
 // peg on core 0
 #define PEG_R 6 // peg radius
@@ -133,6 +136,26 @@ char curr_time_buffer[20] ; // for converting the unint time to buffer
 #define NUM_BINS 15
 int bins[NUM_BINS] = {0} ;
 //int bin_idx = 0 ;
+int new_heights[NUM_BINS] = {0} ; // the height of the histograms normalized to the max height
+int old_heights[NUM_BINS] = {0} ; // old height of the bar
+
+// state machine variables - debouncing
+// states
+#define NOT_PRESSED 0
+#define MAYBE_PRESSED 1
+#define PRESSED 2
+#define MAYBE_NOT_PRESSED 3
+volatile int possible = -1 ; // previous button pressed value
+volatile unsigned int STATE_0 = NOT_PRESSED ;
+//volatile int i ; // current button value pressed
+
+// state machine variables - button pressing
+#define PIN_BUTTON 15 // gpio 15 (pin 20), use ground pin 18
+// states
+#define INIT 0
+#define ADJUST_BALLS 1 // to adjust the number of balls with potentiometers
+#define ADJUST_BOUNCE 2 // to adjust the bounciness
+volatile unsigned int STATE_1 = INIT ;
 
 struct ball {
   fix15 x ;
@@ -278,7 +301,7 @@ static inline void generateBoard() {
       pegs[peg_idx].x = x_new ;
       pegs[peg_idx].y = yi ;
 
-      fillCircle(fix2int15(x_new), fix2int15(yi), PEG_R, RED) ; // draws the pegs for every row
+      drawPeg(fix2int15(x_new), fix2int15(yi)) ; // draws the pegs for every row
 
       peg_idx++ ;
     }
@@ -302,6 +325,7 @@ static inline void wallsAndEdges(short ball_idx) {
   }
   if (hitBottom(balls[ball_idx].y)) {
     int x_pos = fix2int15(balls[ball_idx].x) ; // extract x position of ball
+    //bin_idx = fix2int15(divfix(int2fix15((x_pos - 10) * NUM_BINS), 620));
     int bin_idx = ((x_pos - 10) * NUM_BINS / 620) ; // normalize the bin index to the size of the arena
     if (bin_idx < 0) { // edge case for the left side of board
       bin_idx = 0 ;
@@ -323,7 +347,8 @@ static inline void wallsAndEdges(short ball_idx) {
   }
 }
 
-static inline void hitPeg(short ball_idx, short peg_idx) {
+static inline void hitPeg(short ball_idx, short peg_idx) 
+{
   // because this is the ball radius + peg radius, 
   // required to see if the x and y distances are less than the collision distance
   // computing difference in position
@@ -384,7 +409,7 @@ static inline void initTimer() {
 }
 
 // ==================================================
-// === users serial input thread
+// === LED THREAD (needs to be removed)
 // ==================================================
 static PT_THREAD (protothread_serial(struct pt *pt))
 {
@@ -438,9 +463,8 @@ static PT_THREAD (protothread_anim(struct pt *pt))
       // update ball's position and velocity
       // need to do for every ball, then for every peg... nested for loops???
       for (int ball = 0; ball < MAX_BALLS; ball++) {
-
         // erase ball at old position
-        fillCircle(fix2int15(balls[ball].x), fix2int15(balls[ball].y), BALL_R, BLACK) ;
+        maskBall(fix2int15(balls[ball].x), fix2int15(balls[ball].y)) ;
         if (ball < active_balls) {
           // Apply gravity to the ball
           balls[ball].vy = balls[ball].vy + float2fix15(GRAVITY_FRACTION) ;
@@ -454,12 +478,7 @@ static PT_THREAD (protothread_anim(struct pt *pt))
           wallsAndEdges(ball) ;
 
           // draw the ball at its new position
-          fillCircle(fix2int15(balls[ball].x), fix2int15(balls[ball].y), BALL_R, color) ;
-        }
-        else {
-          balls[ball].x = int2fix15(BALL_SPAWN_X) ;
-          balls[ball].y = int2fix15(BALL_SPAWN_Y) ;
-          balls[ball].last_peg = -1 ;
+          drawBall(fix2int15(balls[ball].x), fix2int15(balls[ball].y)) ;
         }
       }
 
@@ -473,7 +492,8 @@ static PT_THREAD (protothread_anim(struct pt *pt))
 } // animation thread
 
 
-static PT_THREAD (protothread_histo(struct pt *pt)) {
+static PT_THREAD (protothread_histo(struct pt *pt)) 
+{
   // Mark beginning of thread
     PT_BEGIN(pt);
     
@@ -485,10 +505,10 @@ static PT_THREAD (protothread_histo(struct pt *pt)) {
       begin_time = time_us_32() ;
 
       // erase old histo
-      fillRect(10, 410, 620, 60, BLACK) ;
+      //fillRect(10, 410, 620, 60, BLACK) ;
 
       // normalize the histogram (keep track of the bin with the max height)
-      int bin_max_h = 1 ;
+      int bin_max_h = -1 ;
       for (int i = 0; i < NUM_BINS; i++) {
         if (bins[i] > bin_max_h) {
           bin_max_h = bins[i] ;
@@ -497,9 +517,43 @@ static PT_THREAD (protothread_histo(struct pt *pt)) {
 
       // draw the bars
       int bar_width = 38; // based on center to center distance between pegs
+      int height_difference ; // remainder of balls not part of normalized
+
       for (int i = 0; i < NUM_BINS; i++) {
-        int bar_height = (bins[i] * 60) / bin_max_h; ; // normalize the height of the bins to 180 pixels (not)
-        fillRect((35 + (bar_width * i)), 470 - bar_height, bar_width, bar_height, RED) ; // the rectangles are starting from the left of the peg
+        if (bin_max_h > 0) {
+          new_heights[i] = (bins[i] * 60) / bin_max_h ;
+        }
+        else {
+          new_heights[i] = bins[i] ; 
+        }
+        int x_coord = (35 + (bar_width * i)) ;
+
+        drawRect(x_coord, 470 - old_heights[i], bar_width, old_heights[i], BLACK) ;
+        drawRect(x_coord, 470 - new_heights[i], bar_width, new_heights[i], RED) ;
+
+        old_heights[i] = new_heights[i] ; // update old value regardless
+
+        // // if the bar is growing, draw the addition on top only
+        // if (old_heights[i] < new_heights[i]) { 
+        //   height_difference = new_heights[i] - old_heights[i] ; // the difference between the old height and new height
+        //   // x value is the bucket start, y value is bottom-newheight, width same, only draw the difference
+        //   drawRect(x_coord, 470 - new_heights[i], bar_width, height_difference, RED) ; 
+        //   drawHLine(x_coord, 470 - old_heights[i], bar_width, BLACK) ;
+        // }
+        // // if the bar is getting normalized
+        // else if (old_heights[i] > new_heights[i]) { 
+        //   height_difference = old_heights[i] - new_heights[i] ; // rectangle to get subtracted
+        //   // draw a blackout rectangle over the old bin height to cross it out
+        //   drawRect(x_coord, 470 - old_heights[i], bar_width, height_difference, BLACK) ;
+        //   // draw the red line to complete the height
+        //   drawHLine(x_coord, 470 - new_heights[i], bar_width, RED) ;
+        // }
+        // // else just keep the rectangle the same
+        // else {
+        //   drawRect(x_coord, 470 - new_heights[i], bar_width, new_heights[i], RED) ;
+        // }
+        // old_heights[i] = new_heights[i] ; // update old value regardless
+        // if the bar is growing, draw the addition on top only
       }
       
       // delay in accordance with frame rate
@@ -510,7 +564,8 @@ static PT_THREAD (protothread_histo(struct pt *pt)) {
     PT_END(pt);
 } // thread to animate histogram
 
-static PT_THREAD(protothread_pot(struct pt *pt)) {
+static PT_THREAD(protothread_pot(struct pt *pt)) 
+{
   PT_BEGIN(pt);
 
   // Variables for maintaining frame rate
@@ -520,7 +575,7 @@ static PT_THREAD(protothread_pot(struct pt *pt)) {
     // Measure time at start of thread
     begin_time = time_us_32() ;
 
-    uint16_t adc_result = adc_read() ;
+    fix15 adc_result = int2fix15(adc_read()) ;
 
     // average the ADC reads to make sure that the noise is averaged out
     // uint16_t adc_sum = 0 ;
@@ -528,13 +583,12 @@ static PT_THREAD(protothread_pot(struct pt *pt)) {
     //   adc_sum += adc_read() ;
     // }
     // uint16_t adc_result = adc_sum >> 4 ; // divide by 4
-    active_balls = (adc_result * (MAX_BALLS - 1) / 4095) + 1 ;
+    //active_balls = ((adc_result * (MAX_BALLS - 1)) / 4096) + 1 ;
+    fix15 imm_prod = multfix15(adc_result, (MAX_BALLS));
+    active_balls = fix2int15(divfix(imm_prod, 4096));
 
     // delay in accordance with frame rate
     spare_time = FRAME_RATE - (time_us_32() - begin_time) ;
-
-    // DEBUG PRINT
-    printf("ADC Raw: %d, Active Balls: %d\n", adc_result, active_balls) ;
 
     // yield for necessary amount of time
     PT_YIELD_usec(spare_time) ;
@@ -542,18 +596,89 @@ static PT_THREAD(protothread_pot(struct pt *pt)) {
   PT_END(pt) ;
 } // thread for the potentiometer
 
+static PT_THREAD(protothread_debouncing(struct pt *pt)) 
+{
+  PT_BEGIN(pt);
+
+  // Variables for maintaining frame rate
+  static int spare_time ;
+  int i = gpio_get(PIN_BUTTON) ; // value of press
+  // gpio_pin.value()
+
+  while(1) {
+    begin_time = time_us_32() ;
+    
+    // Now implementing state machine logic to see when the beep will play (FSM)
+    // STATE_0 is initialized as 0 when program starts
+    // If STATE_0 == 0 (keypad = -1), then remain in that state
+    // Not pressed state
+    if (STATE_0 == NOT_PRESSED) {
+      // if no press or invalid, stay in state 0
+      if (i == -1) {
+        STATE_0 = NOT_PRESSED;
+      }
+      // press is valid, move to maybe pressed state
+      else {
+        STATE_0 = MAYBE_PRESSED;
+        possible = i;
+        }
+    }
+    // Maybe pressed state
+    else if (STATE_0 == MAYBE_PRESSED) {
+      // if the numbers match up, then move on to next state
+      // this is the state transitioning from maybe pressed to pressed
+      // so now the beep will be triggered here (flag)
+      // else go back to not pressed
+      if (possible == 1) { // if button pressed
+        STATE_0 = NOT_PRESSED;
+      }
+    }
+    // pressed state
+    else if (STATE_0 == 2) {
+      // if key pressed still matches remain in state
+      if (possible == i) {
+        STATE_0 = 2;
+      }
+      // else move to maybe not pressed
+      else {
+        STATE_0 = 3;
+      }
+    }
+    // maybe not pressed state
+    else if (STATE_0 == 3) {
+      // if matches, go back to pressed
+      if (possible == i) {
+        STATE_0 = 2;
+      }
+      // else go to not pressed
+      else {
+        STATE_0 = 0;
+      }
+    }
+    
+    // delay in accordance with frame rate
+    spare_time = FRAME_RATE - (time_us_32() - begin_time) ;
+
+    // yield for necessary amount of time
+    PT_YIELD_usec(spare_time) ;
+  }
+  PT_END(pt) ;
+} // thread for the debouncing
+
+
 
 // ========================================
 // === Core 1 entry
 // ========================================
 // put user input thread on core1
 
-void core1_entry() {
+void core1_entry() 
+{
 
   // Add serial input thread to core1 scheduler
   pt_add_thread(protothread_serial) ;
   //pt_add_thread(protothread_timer) ;
-  pt_add_thread(protothread_histo);
+  
   pt_add_thread(protothread_pot) ;
 
   // start scheduler on core1
@@ -566,7 +691,7 @@ void core1_entry() {
 // ========================================
 // USE ONLY C-sdk library
 int main(){
-  set_sys_clock_khz(150000, true) ;
+  set_sys_clock_khz(CLOCK_SPEED, true) ;
   // initialize stio
   stdio_init_all() ;
 
@@ -583,6 +708,10 @@ int main(){
   adc_gpio_init(ADC_PIN) ;
   adc_select_input(ADC_CHAN) ;
 
+  // setup button gpio
+  gpio_init(PIN_BUTTON) ;
+  gpio_put(PIN_BUTTON, 1) ; // drive the pin normally high, if button pressed will be low
+
   // initialize VGA
   initVGA() ;
 
@@ -598,6 +727,7 @@ int main(){
 
   // add threads
   pt_add_thread(protothread_anim);
+  pt_add_thread(protothread_histo);
 
   // start scheduler
   pt_schedule_start ;
