@@ -27,6 +27,7 @@
 #include <hardware/gpio.h>
 #include <hardware/timer.h>
 #include <hardware/adc.h>
+#include <iso646.h>
 #include <pico/error.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -80,7 +81,10 @@ typedef signed int fix15 ;
 #define GRAVITY_FRACTION 0.75
 
 // BOUNCINESS
-#define BOUNCINESS 0.5
+//#define BOUNCINESS 0.5
+#define MAX_BOUNCE 1
+volatile float bounciness = 0.5 ; // initialize bounce
+char bounciness_buffer[20] ; // buffer for snprintf 
 
 // SPI configs for the DAC
 #define PIN_CS   5
@@ -111,8 +115,8 @@ char color = RED ;
 #define BALL_SPAWN_Y 50
 #define BALL_R  1 // BALL RADIUS
 #define MAX_BALLS 2000 
-volatile uint active_balls = 1 ;
-int fallen_balls = 0 ;
+volatile unsigned int active_balls = 1 ;
+volatile unsigned int fallen_balls = 0 ;
 char active_balls_buffer[20] ; // buffer for snprintf 
 char fallen_balls_buffer[20] ;
 
@@ -145,9 +149,8 @@ int old_heights[NUM_BINS] = {0} ; // old height of the bar
 #define MAYBE_PRESSED 1
 #define PRESSED 2
 #define MAYBE_NOT_PRESSED 3
-volatile int possible = -1 ; // previous button pressed value
+volatile int possible = 1 ; // init high
 volatile unsigned int STATE_0 = NOT_PRESSED ;
-//volatile int i ; // current button value pressed
 
 // state machine variables - button pressing
 #define PIN_BUTTON 15 // gpio 15 (pin 20), use ground pin 18
@@ -155,7 +158,11 @@ volatile unsigned int STATE_0 = NOT_PRESSED ;
 #define INIT 0
 #define ADJUST_BALLS 1 // to adjust the number of balls with potentiometers
 #define ADJUST_BOUNCE 2 // to adjust the bounciness
-volatile unsigned int STATE_1 = INIT ;
+volatile unsigned int STATE_1 = INIT ; // initalize the state of this fsm
+volatile int btn_pressed = 0 ;
+char state_buffer[20] ; // buffer for snprintf for the current state
+volatile int pot_funct = INIT ; // function of potentiometer, initialized at INIT, can be ADJUST_BALLS, ADJUST_BOUNCE
+
 
 struct ball {
   fix15 x ;
@@ -320,7 +327,7 @@ static inline void generateBoard() {
 static inline void wallsAndEdges(short ball_idx) {
   // Reverse direction if we've hit a wall
   if (hitTop(balls[ball_idx].y)) {
-    balls[ball_idx].vy = multfix15(float2fix15(BOUNCINESS), (-balls[ball_idx].vy)) ;
+    balls[ball_idx].vy = multfix15(float2fix15(bounciness), (-balls[ball_idx].vy)) ;
     balls[ball_idx].y  = (balls[ball_idx].y + int2fix15(5)) ;
   }
   if (hitBottom(balls[ball_idx].y)) {
@@ -338,11 +345,11 @@ static inline void wallsAndEdges(short ball_idx) {
     fallen_balls += 1 ;
   }
   if (hitRight(balls[ball_idx].x)) {
-    balls[ball_idx].vx = multfix15(float2fix15(BOUNCINESS), (-balls[ball_idx].vx)) ;
+    balls[ball_idx].vx = multfix15(float2fix15(bounciness), (-balls[ball_idx].vx)) ;
     balls[ball_idx].x  = (balls[ball_idx].x - int2fix15(5)) ;
   }
   if (hitLeft(balls[ball_idx].x)) {
-    balls[ball_idx].vx = multfix15(float2fix15(BOUNCINESS), (-balls[ball_idx].vx)) ;
+    balls[ball_idx].vx = multfix15(float2fix15(bounciness), (-balls[ball_idx].vx)) ;
     balls[ball_idx].x  = (balls[ball_idx].x + int2fix15(5)) ;
   }
 }
@@ -387,8 +394,8 @@ static inline void hitPeg(short ball_idx, short peg_idx)
         balls[ball_idx].vy = balls[ball_idx].vy + multfix15(normal_y, intermediate) ;
 
         // Lose some energy (BOUNCINESS factor)
-        balls[ball_idx].vx = multfix15(float2fix15(BOUNCINESS), balls[ball_idx].vx) ;
-        balls[ball_idx].vy = multfix15(float2fix15(BOUNCINESS), balls[ball_idx].vy) ;
+        balls[ball_idx].vx = multfix15(float2fix15(bounciness), balls[ball_idx].vx) ;
+        balls[ball_idx].vy = multfix15(float2fix15(bounciness), balls[ball_idx].vy) ;
 
         // Play sound if new peg struck
         if (balls[ball_idx].last_peg != peg_idx) {
@@ -452,10 +459,14 @@ static PT_THREAD (protothread_anim(struct pt *pt))
       snprintf(active_balls_buffer, 20, "%d", active_balls); // converts int to string
       writeString(active_balls_buffer) ;
       setCursor(30, 50);
+      writeString("Bounciness: ") ;
+      snprintf(bounciness_buffer, 20, "%.2f", bounciness); // converts int to string
+      writeString(bounciness_buffer) ;
+      setCursor(30, 60);
       writeString("Balls fallen through: ") ;
       snprintf(fallen_balls_buffer, 20, "%d", fallen_balls); // converts int to string
       writeString(fallen_balls_buffer) ;
-      setCursor(30, 60);
+      setCursor(30, 70);
       writeString("Time since boot: ") ;
       snprintf(curr_time_buffer, 20, "%lu", ((time_us_32() - global_start_time_us) / 1000000)); // converts uint time to seconds
       writeString(curr_time_buffer) ;
@@ -584,8 +595,22 @@ static PT_THREAD(protothread_pot(struct pt *pt))
     // }
     // uint16_t adc_result = adc_sum >> 4 ; // divide by 4
     //active_balls = ((adc_result * (MAX_BALLS - 1)) / 4096) + 1 ;
-    fix15 imm_prod = multfix15(adc_result, (MAX_BALLS));
-    active_balls = fix2int15(divfix(imm_prod, 4096));
+
+    // now do the potentiometer function based on what the other thread said
+    switch (pot_funct) {
+      case INIT : // idk if we need this, can change later
+      // does nothing 
+      break ;
+      case ADJUST_BALLS :
+        fix15 imm_prod = multfix15(adc_result, (MAX_BALLS)); 
+        active_balls = fix2int15(divfix(imm_prod, 4096)); // do we need to int2fix15(4096) for the proper fix division?
+      break ;
+      case ADJUST_BOUNCE :
+        fix15 imm_prod = multfix15(adc_result, float2fix15(MAX_BOUNCE));
+        bounciness = fix2float15(divfix(imm_prod, 4096)); // 4096 is the scaling factor for adc
+                                                        // do we need to int2fix15(4096) for the proper fix division?
+      break ;
+    }
 
     // delay in accordance with frame rate
     spare_time = FRAME_RATE - (time_us_32() - begin_time) ;
@@ -602,58 +627,97 @@ static PT_THREAD(protothread_debouncing(struct pt *pt))
 
   // Variables for maintaining frame rate
   static int spare_time ;
-  int i = gpio_get(PIN_BUTTON) ; // value of press
+  
   // gpio_pin.value()
 
   while(1) {
     begin_time = time_us_32() ;
+
+    int i = gpio_get(PIN_BUTTON) ; // value of press
     
-    // Now implementing state machine logic to see when the beep will play (FSM)
-    // STATE_0 is initialized as 0 when program starts
-    // If STATE_0 == 0 (keypad = -1), then remain in that state
-    // Not pressed state
-    if (STATE_0 == NOT_PRESSED) {
-      // if no press or invalid, stay in state 0
-      if (i == -1) {
-        STATE_0 = NOT_PRESSED;
-      }
-      // press is valid, move to maybe pressed state
-      else {
-        STATE_0 = MAYBE_PRESSED;
-        possible = i;
+    // // Now implementing state machine logic
+    // // STATE_0 is initialized as 0 when program starts
+    // // If STATE_0 == 0 (unpressed button high), then remain in that state
+    // // Not pressed state
+    // if (STATE_0 == NOT_PRESSED) {
+    //   // if no press or invalid, stay in state 0
+    //   if (i != 0) {
+    //     STATE_0 = NOT_PRESSED;
+    //   }
+    //   // press is valid, move to maybe pressed state
+    //   else { // gpio reads low
+    //     STATE_0 = MAYBE_PRESSED;
+    //     possible = i;
+    //     }
+    // }
+    // // Maybe pressed state
+    // else if (STATE_0 == MAYBE_PRESSED) {
+    //   // if the numbers match up, then move on to next state
+    //   // this is the state transitioning from maybe pressed to pressed
+    //   // so now the beep will be triggered here (flag)
+    //   // else go back to not pressed
+    //   if (possible == 1) { // if button not pressed
+    //     STATE_0 = NOT_PRESSED;
+    //   }
+    //   else {
+    //     STATE_0 == PRESSED ; // move on
+    //   }
+    // }
+    // // pressed state
+    // else if (STATE_0 == PRESSED) {
+    //   // if key pressed still matches remain in state
+    //   if (possible == i) {
+    //     STATE_0 = MAYBE_PRESSED ;
+    //   }
+    //   // else move to maybe not pressed
+    //   else {
+    //     STATE_0 = MAYBE_NOT_PRESSED ;
+    //   }
+    // }
+    // // maybe not pressed state
+    // else if (STATE_0 == MAYBE_NOT_PRESSED) {
+    //   // if matches, go back to pressed
+    //   if (i == possible) {
+    //     STATE_0 = PRESSED ;
+    //   }
+    //   // else go to not pressed
+    //   else {
+    //     STATE_0 = NOT_PRESSED;
+    //   }
+    // }
+
+    
+    // implementing this debouncing algorithm with switch for clarity rather than if statements
+    switch (STATE_0) {
+      case NOT_PRESSED :
+        if (i == 0) { // if the button is low (pressed)
+          STATE_0 = MAYBE_PRESSED ;
+          possible = i ; 
         }
-    }
-    // Maybe pressed state
-    else if (STATE_0 == MAYBE_PRESSED) {
-      // if the numbers match up, then move on to next state
-      // this is the state transitioning from maybe pressed to pressed
-      // so now the beep will be triggered here (flag)
-      // else go back to not pressed
-      if (possible == 1) { // if button pressed
-        STATE_0 = NOT_PRESSED;
-      }
-    }
-    // pressed state
-    else if (STATE_0 == 2) {
-      // if key pressed still matches remain in state
-      if (possible == i) {
-        STATE_0 = 2;
-      }
-      // else move to maybe not pressed
-      else {
-        STATE_0 = 3;
-      }
-    }
-    // maybe not pressed state
-    else if (STATE_0 == 3) {
-      // if matches, go back to pressed
-      if (possible == i) {
-        STATE_0 = 2;
-      }
-      // else go to not pressed
-      else {
-        STATE_0 = 0;
-      }
+        break ;
+      case MAYBE_PRESSED :
+        if (i == possible) {
+          STATE_0 = PRESSED ;
+          btn_pressed++ ; // send flag, potFSM thread will be activated by this
+        }
+        else {
+          STATE_0 = NOT_PRESSED ;
+        }
+        break ;
+      case PRESSED :
+        if (i == 1) { // if the button is seen high again, maybe not pressed
+          STATE_0 = MAYBE_NOT_PRESSED ;
+          possible = i ;
+        }
+        break ;
+      case MAYBE_NOT_PRESSED :
+        if (i == possible) { //  possible is 1 right now, so if it is high send to not pressed
+          STATE_0 = NOT_PRESSED ;
+        }
+        else {
+          STATE_0 = PRESSED ;
+        }
+        break ;
     }
     
     // delay in accordance with frame rate
@@ -664,6 +728,63 @@ static PT_THREAD(protothread_debouncing(struct pt *pt))
   }
   PT_END(pt) ;
 } // thread for the debouncing
+
+static PT_THREAD(protothread_potFSM(struct pt *pt))
+{
+  PT_BEGIN(pt) ;
+
+  // Variables for maintaining frame rate
+  static int spare_time ;
+
+  while(1) {
+    // since this thread just cycles based on button presses, 
+    // can just wait until the flag is incremented(?), 
+    // and then restart STATE_1 in a loop without switch statements
+
+    PT_WAIT_UNTIL(pt, btn_pressed > 0) ; // not using semaphores (maybe can?)
+    btn_pressed--; // reset flag now that it has been used
+
+    begin_time = time_us_32() ; // idk where to put this
+
+    // reset the histogram and number of fallen balls
+    for (int i = 0; i < 15; i++) { 
+       bins[i] = 0;
+    }
+    fallen_balls = 0 ;
+    
+    // draw box over old text to erase (fix length later)
+    fillRect(30, 70, 250, 60, BLACK);
+
+    switch (STATE_1) { // based on state display the currrent state and determine the function of the potentiometer
+      case INIT :
+        writeString("INIT") ;
+        pot_funct = INIT ;
+      break ;
+      case ADJUST_BALLS :
+        writeString("Adjusting balls") ;
+        pot_funct = ADJUST_BALLS ;
+      break ;
+      case ADJUST_BOUNCE :
+        writeString("Adjusting bounce") ;
+        pot_funct = ADJUST_BOUNCE ;
+      break ;
+    }
+
+    // display the current state
+    setCursor(30, 80);
+    writeString("State: ") ;
+
+    STATE_1 = (STATE_1 + 1) % 3 ; // states 0 through 2, will loop when state reaches 2
+
+    // delay in accordance with frame rate
+    spare_time = FRAME_RATE - (time_us_32() - begin_time) ;
+
+    // yield for necessary amount of time
+    PT_YIELD_usec(spare_time) ;
+  }
+
+  PT_END(pt) ;
+} // thread for potentiometer FSM
 
 
 
@@ -679,7 +800,10 @@ void core1_entry()
   pt_add_thread(protothread_serial) ;
   //pt_add_thread(protothread_timer) ;
   
-  pt_add_thread(protothread_pot) ;
+  // need to keep both potentiometer threads and FSM threads on the same core
+  pt_add_thread(protothread_pot) ; 
+  pt_add_thread(protothread_potFSM) ;
+  pt_add_thread(protothread_debouncing) ;
 
   // start scheduler on core1
   pt_schedule_start ;
@@ -710,6 +834,7 @@ int main(){
 
   // setup button gpio
   gpio_init(PIN_BUTTON) ;
+  gpio_set_dir(PIN_BUTTON, GPIO_IN); // set GPIO to input
   gpio_put(PIN_BUTTON, 1) ; // drive the pin normally high, if button pressed will be low
 
   // initialize VGA
