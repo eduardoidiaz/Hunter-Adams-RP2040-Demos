@@ -29,6 +29,7 @@
 #include <hardware/adc.h>
 #include <iso646.h>
 #include <pico/error.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -85,6 +86,7 @@ typedef signed int fix15 ;
 #define MAX_BOUNCE 1
 volatile float bounciness = 0.5 ; // initialize bounce
 char bounciness_buffer[20] ; // buffer for snprintf 
+volatile float prev_bounciness ;
 
 // SPI configs for the DAC
 #define PIN_CS   5
@@ -113,9 +115,10 @@ char color = RED ;
 // balls
 #define BALL_SPAWN_X 320
 #define BALL_SPAWN_Y 50
-#define BALL_R  1 // BALL RADIUS
-#define MAX_BALLS 2000 
+#define BALL_R  2 // BALL RADIUS
+#define MAX_BALLS 4000 
 volatile unsigned int active_balls = 1 ;
+volatile unsigned int prev_active_balls ; // keeping track of number of balls 
 volatile unsigned int fallen_balls = 0 ;
 char active_balls_buffer[20] ; // buffer for snprintf 
 char fallen_balls_buffer[20] ;
@@ -132,7 +135,7 @@ fix15 peg0_y = int2fix15(100) ;
 #define R_SUM_SQ int2fix15((BALL_R + PEG_R) * (BALL_R + PEG_R))
 
 // timing variables
-static uint32_t begin_time ;
+// static uint32_t begin_time ; // We needed local statics to do fps led
 static uint32_t global_start_time_us;   // When the timer started
 char curr_time_buffer[20] ; // for converting the unint time to buffer
 
@@ -404,26 +407,40 @@ static inline void hitPeg(short ball_idx, short peg_idx)
         }
       }
     } 
-    else {
-      balls[ball_idx].last_peg = -1 ;
-    }
+    // else {
+    //   balls[ball_idx].last_peg = -1 ;
+    // }
   }  
+}
+
+static inline void check_collisions_opt(short ball_idx) 
+{
+  // Ball's y position determines its approximate row
+  // Pegs are 19px apart vertically, starting at y=100
+  short curr_row = fix2int15(
+    divfix((balls[ball_idx].y - int2fix15(100)), int2fix15(19))) ;
+  
+  // Safety check for bounds
+  if (curr_row < 0) curr_row = 0 ;
+  if (curr_row > 15) curr_row = 15;
+  
+  // Calculate starting peg idx for curr_row and the next
+  short start_peg = (curr_row * (curr_row + 1)) / 2 ;
+  short end_peg   = ((curr_row + 2) * (curr_row + 3)) / 2 ;
+   
+  // bounds check
+  if (end_peg > 136) end_peg = 136 ;
+  
+  // Only check pegs in two rows
+  for (short peg = start_peg; peg < end_peg; peg++) {
+    hitPeg(ball_idx, peg);
+  }
 }
 
 // timer function to start the timer at boot
 static inline void initTimer() {
   global_start_time_us = time_us_32();
 }
-
-// ==================================================
-// === LED THREAD (needs to be removed)
-// ==================================================
-static PT_THREAD (protothread_serial(struct pt *pt))
-{
-  PT_BEGIN(pt);
-  gpio_put(LED, !gpio_get(LED)) ;
-  PT_END(pt);
-} // timer thread
 
 // Animation on core 0, animating the ball bouncing on peg
 static PT_THREAD (protothread_anim(struct pt *pt))
@@ -432,6 +449,7 @@ static PT_THREAD (protothread_anim(struct pt *pt))
     PT_BEGIN(pt);
 
     // Variables for maintaining frame rate
+    static uint32_t begin_time ;
     static int spare_time ;
     for (int u = 0; u < active_balls; u++) {
       spawnBall(u) ;
@@ -439,6 +457,10 @@ static PT_THREAD (protothread_anim(struct pt *pt))
     
     // spawn the board
     generateBoard() ;
+
+    // set variables for comparison for resetting histogram
+    prev_active_balls = active_balls ;
+    prev_bounciness = bounciness ;
 
     // initialize the VGA text
     setTextColor(RED) ;
@@ -452,7 +474,7 @@ static PT_THREAD (protothread_anim(struct pt *pt))
       //drawArena() ;
 
       // draw box over old text to erase
-      fillRect(30, 40, 250, 60, BLACK);
+      fillRect(30, 40, 250, 50, BLACK);
       // Generate the text for the screen
       setCursor(30, 40);
       writeString("Balls on screen: ") ;
@@ -471,6 +493,11 @@ static PT_THREAD (protothread_anim(struct pt *pt))
       snprintf(curr_time_buffer, 20, "%lu", ((time_us_32() - global_start_time_us) / 1000000)); // converts uint time to seconds
       writeString(curr_time_buffer) ;
 
+      // display the current state
+      setCursor(30, 80);
+      writeString("State: ") ;
+      writeString(state_buffer) ;
+
       // update ball's position and velocity
       // need to do for every ball, then for every peg... nested for loops???
       for (int ball = 0; ball < MAX_BALLS; ball++) {
@@ -482,9 +509,8 @@ static PT_THREAD (protothread_anim(struct pt *pt))
           balls[ball].x += balls[ball].vx ;
           balls[ball].y += balls[ball].vy ;
           
-          for (int peg = 0; peg < 136; peg++) {
-            hitPeg(ball, peg) ;
-          }
+          check_collisions_opt(ball);
+          
           // Update the walls and edges, and handle wall collisions
           wallsAndEdges(ball) ;
 
@@ -495,6 +521,14 @@ static PT_THREAD (protothread_anim(struct pt *pt))
 
       // delay in accordance with frame rate
       spare_time = FRAME_RATE - (time_us_32() - begin_time) ;
+
+      // Check if framerate is met
+      if (spare_time < 0) {
+        gpio_put(LED, 1) ; 
+      }
+      else {
+        gpio_put(LED, 0) ;
+      }
       // yield for necessary amount of time
       PT_YIELD_usec(spare_time) ;
      // NEVER exit while
@@ -509,6 +543,7 @@ static PT_THREAD (protothread_histo(struct pt *pt))
     PT_BEGIN(pt);
     
     // Variables for maintaining frame rate
+    static uint32_t begin_time ;
     static int spare_time ;
 
     while(1) {
@@ -581,35 +616,52 @@ static PT_THREAD(protothread_pot(struct pt *pt))
 
   // Variables for maintaining frame rate
   static int spare_time ;
+  static uint32_t begin_time ;
 
   while (1) {
     // Measure time at start of thread
     begin_time = time_us_32() ;
 
-    fix15 adc_result = int2fix15(adc_read()) ;
+    // fix15 adc_result = int2fix15(adc_read()) ;
 
     // average the ADC reads to make sure that the noise is averaged out
-    // uint16_t adc_sum = 0 ;
-    // for (int i = 0; i < 16; i++) {
-    //   adc_sum += adc_read() ;
-    // }
-    // uint16_t adc_result = adc_sum >> 4 ; // divide by 4
+    uint32_t adc_sum = 0 ;
+    for (int i = 0; i < 16; i++) {
+      adc_sum += adc_read() ;
+    }
+    uint32_t adc_filtered = adc_sum >> 4 ; // divide by 16 by shifting 4 bits
     //active_balls = ((adc_result * (MAX_BALLS - 1)) / 4096) + 1 ;
 
     // now do the potentiometer function based on what the other thread said
     switch (pot_funct) {
+      fix15 imm_prod;
       case INIT : // idk if we need this, can change later
       // does nothing 
       break ;
       case ADJUST_BALLS :
-        fix15 imm_prod = multfix15(adc_result, (MAX_BALLS)); 
+        imm_prod = multfix15(int2fix15(adc_filtered), (MAX_BALLS)); // Don't need to convert MAX_BALLS
         active_balls = fix2int15(divfix(imm_prod, 4096)); // do we need to int2fix15(4096) for the proper fix division?
       break ;
       case ADJUST_BOUNCE :
-        fix15 imm_prod = multfix15(adc_result, float2fix15(MAX_BOUNCE));
-        bounciness = fix2float15(divfix(imm_prod, 4096)); // 4096 is the scaling factor for adc
-                                                        // do we need to int2fix15(4096) for the proper fix division?
+        imm_prod = multfix15(int2fix15(adc_filtered), float2fix15(MAX_BOUNCE));
+        bounciness = fix2float15(divfix(imm_prod, int2fix15(4096))); //4096 is the scaling factor for adc
       break ;
+    }
+
+    if ((prev_active_balls >= active_balls + 1) || (prev_active_balls <= active_balls - 1) || (prev_bounciness >= bounciness + 0.1) || (prev_bounciness <= bounciness - 0.1)) {
+      // reset the histogram and number of fallen balls
+      for (int i = 0; i < 15; i++) { 
+        bins[i] = 0 ;
+        old_heights[i] = 0 ;
+        new_heights[i] = 0 ;
+      }
+      fallen_balls = 0 ;
+      //erase old histo
+      fillRect(10, 410, 620, 60, BLACK) ;
+
+      // Update previous values to reflect the new state
+      prev_active_balls = active_balls;
+      prev_bounciness = bounciness;
     }
 
     // delay in accordance with frame rate
@@ -627,6 +679,7 @@ static PT_THREAD(protothread_debouncing(struct pt *pt))
 
   // Variables for maintaining frame rate
   static int spare_time ;
+  static uint32_t begin_time ;
   
   // gpio_pin.value()
 
@@ -634,58 +687,6 @@ static PT_THREAD(protothread_debouncing(struct pt *pt))
     begin_time = time_us_32() ;
 
     int i = gpio_get(PIN_BUTTON) ; // value of press
-    
-    // // Now implementing state machine logic
-    // // STATE_0 is initialized as 0 when program starts
-    // // If STATE_0 == 0 (unpressed button high), then remain in that state
-    // // Not pressed state
-    // if (STATE_0 == NOT_PRESSED) {
-    //   // if no press or invalid, stay in state 0
-    //   if (i != 0) {
-    //     STATE_0 = NOT_PRESSED;
-    //   }
-    //   // press is valid, move to maybe pressed state
-    //   else { // gpio reads low
-    //     STATE_0 = MAYBE_PRESSED;
-    //     possible = i;
-    //     }
-    // }
-    // // Maybe pressed state
-    // else if (STATE_0 == MAYBE_PRESSED) {
-    //   // if the numbers match up, then move on to next state
-    //   // this is the state transitioning from maybe pressed to pressed
-    //   // so now the beep will be triggered here (flag)
-    //   // else go back to not pressed
-    //   if (possible == 1) { // if button not pressed
-    //     STATE_0 = NOT_PRESSED;
-    //   }
-    //   else {
-    //     STATE_0 == PRESSED ; // move on
-    //   }
-    // }
-    // // pressed state
-    // else if (STATE_0 == PRESSED) {
-    //   // if key pressed still matches remain in state
-    //   if (possible == i) {
-    //     STATE_0 = MAYBE_PRESSED ;
-    //   }
-    //   // else move to maybe not pressed
-    //   else {
-    //     STATE_0 = MAYBE_NOT_PRESSED ;
-    //   }
-    // }
-    // // maybe not pressed state
-    // else if (STATE_0 == MAYBE_NOT_PRESSED) {
-    //   // if matches, go back to pressed
-    //   if (i == possible) {
-    //     STATE_0 = PRESSED ;
-    //   }
-    //   // else go to not pressed
-    //   else {
-    //     STATE_0 = NOT_PRESSED;
-    //   }
-    // }
-
     
     // implementing this debouncing algorithm with switch for clarity rather than if statements
     switch (STATE_0) {
@@ -735,6 +736,11 @@ static PT_THREAD(protothread_potFSM(struct pt *pt))
 
   // Variables for maintaining frame rate
   static int spare_time ;
+  static uint32_t begin_time ;
+
+  // initialize the VGA text
+  setTextColor(RED) ;
+  setTextSize(1) ;
 
   while(1) {
     // since this thread just cycles based on button presses, 
@@ -746,35 +752,22 @@ static PT_THREAD(protothread_potFSM(struct pt *pt))
 
     begin_time = time_us_32() ; // idk where to put this
 
-    // reset the histogram and number of fallen balls
-    for (int i = 0; i < 15; i++) { 
-       bins[i] = 0;
-    }
-    fallen_balls = 0 ;
-    
-    // draw box over old text to erase (fix length later)
-    fillRect(30, 70, 250, 60, BLACK);
+    STATE_1 = (STATE_1 + 1) % 3 ; // states 0 through 2, will loop when state reaches 2
 
     switch (STATE_1) { // based on state display the currrent state and determine the function of the potentiometer
       case INIT :
-        writeString("INIT") ;
+        strcpy(state_buffer, "INIT") ;
         pot_funct = INIT ;
       break ;
       case ADJUST_BALLS :
-        writeString("Adjusting balls") ;
+        strcpy(state_buffer, "Adjusting balls") ;
         pot_funct = ADJUST_BALLS ;
       break ;
       case ADJUST_BOUNCE :
-        writeString("Adjusting bounce") ;
+        strcpy(state_buffer, "Adjusting bounce") ;
         pot_funct = ADJUST_BOUNCE ;
       break ;
     }
-
-    // display the current state
-    setCursor(30, 80);
-    writeString("State: ") ;
-
-    STATE_1 = (STATE_1 + 1) % 3 ; // states 0 through 2, will loop when state reaches 2
 
     // delay in accordance with frame rate
     spare_time = FRAME_RATE - (time_us_32() - begin_time) ;
@@ -796,8 +789,6 @@ static PT_THREAD(protothread_potFSM(struct pt *pt))
 void core1_entry() 
 {
 
-  // Add serial input thread to core1 scheduler
-  pt_add_thread(protothread_serial) ;
   //pt_add_thread(protothread_timer) ;
   
   // need to keep both potentiometer threads and FSM threads on the same core
@@ -835,10 +826,20 @@ int main(){
   // setup button gpio
   gpio_init(PIN_BUTTON) ;
   gpio_set_dir(PIN_BUTTON, GPIO_IN); // set GPIO to input
-  gpio_put(PIN_BUTTON, 1) ; // drive the pin normally high, if button pressed will be low
+  gpio_pull_up(PIN_BUTTON) ; // drive the pin normally high, if button pressed will be low
 
   // initialize VGA
   initVGA() ;
+
+  // initialize state to init
+  // initialize the VGA text
+  setTextColor(RED) ;
+  setTextSize(1) ;
+  setCursor(30, 80);
+  writeString("State: ") ;
+  strcpy(state_buffer, "INIT") ;
+  writeString(state_buffer) ;
+  pot_funct = INIT;
 
   // Seed random number gen
   srand(time_us_32()) ;
