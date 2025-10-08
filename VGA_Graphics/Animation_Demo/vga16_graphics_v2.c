@@ -361,6 +361,50 @@ void drawRect(short x, short y, short w, short h, char color) {
   drawVLine(x+w-1, y, h, color);
 }
 
+void drawCircle(short x0, short y0, short r, char color) {
+/* Draw a circle outline with center (x0,y0) and radius r, with given color
+ * Parameters:
+ *      x0: x-coordinate of center of circle. The top-left of the screen
+ *          has x-coordinate 0 and increases to the right
+ *      y0: y-coordinate of center of circle. The top-left of the screen
+ *          has y-coordinate 0 and increases to the bottom
+ *      r:  radius of circle
+ *      color: 16-bit color value for the circle. Note that the circle
+ *          isn't filled. So, this is the color of the outline of the circle
+ * Returns: Nothing
+ */
+  short f = 1 - r;
+  short ddF_x = 1;
+  short ddF_y = -2 * r;
+  short x = 0;
+  short y = r;
+
+  drawPixel(x0  , y0+r, color);
+  drawPixel(x0  , y0-r, color);
+  drawPixel(x0+r, y0  , color);
+  drawPixel(x0-r, y0  , color);
+
+  while (x<y) {
+    if (f >= 0) {
+      y--;
+      ddF_y += 2;
+      f += ddF_y;
+    }
+    x++;
+    ddF_x += 2;
+    f += ddF_x;
+
+    drawPixel(x0 + x, y0 + y, color);
+    drawPixel(x0 - x, y0 + y, color);
+    drawPixel(x0 + x, y0 - y, color);
+    drawPixel(x0 - x, y0 - y, color);
+    drawPixel(x0 + y, y0 + x, color);
+    drawPixel(x0 - y, y0 + x, color);
+    drawPixel(x0 + y, y0 - x, color);
+    drawPixel(x0 - y, y0 - x, color);
+  }
+}
+
 void drawBall(short x0, short y0) {
 /* Draw a circle outline with center (x0,y0) and radius 1, with given color
  * Parameters:
@@ -450,6 +494,123 @@ void drawPeg(short x0, short y0) {
   drawRedPixel(x0 + 4, y0 - 4);
   drawRedPixel(x0 - 4, y0 - 4);
 }
+
+void drawCircleHelper( short x0, short y0, short r, unsigned char cornername, char color) {
+// Helper function for drawing circles and circular objects
+  short f     = 1 - r;
+  short ddF_x = 1;
+  short ddF_y = -2 * r;
+  short x     = 0;
+  short y     = r;
+
+  while (x<y) {
+    if (f >= 0) {
+      y--;
+      ddF_y += 2;
+      f     += ddF_y;
+    }
+    x++;
+    ddF_x += 2;
+    f     += ddF_x;
+    if (cornername & 0x4) {
+      drawPixel(x0 + x, y0 + y, color);
+      drawPixel(x0 + y, y0 + x, color);
+    }
+    if (cornername & 0x2) {
+      drawPixel(x0 + x, y0 - y, color);
+      drawPixel(x0 + y, y0 - x, color);
+    }
+    if (cornername & 0x8) {
+      drawPixel(x0 - y, y0 + x, color);
+      drawPixel(x0 - x, y0 + y, color);
+    }
+    if (cornername & 0x1) {
+      drawPixel(x0 - y, y0 - x, color);
+      drawPixel(x0 - x, y0 - y, color);
+    }
+  }
+}
+
+void fillCircle(short x0, short y0, short r, char color) {
+/* Draw a filled circle with center (x0,y0) and radius r, with given color
+ * Parameters:
+ *      x0: x-coordinate of center of circle. The top-left of the screen
+ *          has x-coordinate 0 and increases to the right
+ *      y0: y-coordinate of center of circle. The top-left of the screen
+ *          has y-coordinate 0 and increases to the bottom
+ *      r:  radius of circle
+ *      color: 16-bit color value for the circle
+ * Returns: Nothing
+ */
+  drawVLine(x0, y0-r, 2*r+1, color);
+  fillCircleHelper(x0, y0, r, 3, 0, color);
+}
+
+void fillCircleHelper(short x0, short y0, short r, unsigned char cornername, short delta, char color) {
+// Helper function for drawing filled circles
+  short f     = 1 - r;
+  short ddF_x = 1;
+  short ddF_y = -2 * r;
+  short x     = 0;
+  short y     = r;
+
+  while (x<y) {
+    if (f >= 0) {
+      y--;
+      ddF_y += 2;
+      f     += ddF_y;
+    }
+    x++;
+    ddF_x += 2;
+    f     += ddF_x;
+
+    if (cornername & 0x1) {
+      drawVLine(x0+x, y0-y, 2*y+1+delta, color);
+      drawVLine(x0+y, y0-x, 2*x+1+delta, color);
+    }
+    if (cornername & 0x2) {
+      drawVLine(x0-x, y0-y, 2*y+1+delta, color);
+      drawVLine(x0-y, y0-x, 2*x+1+delta, color);
+    }
+  }
+}
+
+// Draw a rounded rectangle
+void drawRoundRect(short x, short y, short w, short h, short r, char color) {
+/* Draw a rounded rectangle outline with top left vertex (x,y), width w,
+ * height h and radius of curvature r at given color
+ * Parameters:
+ *      x:  x-coordinate of top-left vertex. The x-coordinate of
+ *          the top-left of the screen is 0. It increases to the right.
+ *      y:  y-coordinate of top-left vertex. The y-coordinate of
+ *          the top-left of the screen is 0. It increases to the bottom.
+ *      w:  width of the rectangle
+ *      h:  height of the rectangle
+ *      color:  16-bit color of the rectangle outline
+ * Returns: Nothing
+ */
+  // smarter version
+  drawHLine(x+r  , y    , w-2*r, color); // Top
+  drawHLine(x+r  , y+h-1, w-2*r, color); // Bottom
+  drawVLine(x    , y+r  , h-2*r, color); // Left
+  drawVLine(x+w-1, y+r  , h-2*r, color); // Right
+  // draw four corners
+  drawCircleHelper(x+r    , y+r    , r, 1, color);
+  drawCircleHelper(x+w-r-1, y+r    , r, 2, color);
+  drawCircleHelper(x+w-r-1, y+h-r-1, r, 4, color);
+  drawCircleHelper(x+r    , y+h-r-1, r, 8, color);
+}
+
+// Fill a rounded rectangle
+void fillRoundRect(short x, short y, short w, short h, short r, char color) {
+  // smarter version
+  fillRect(x+r, y, w-2*r, h, color);
+
+  // draw four corners
+  fillCircleHelper(x+w-r-1, y+r, r, 1, h-2*r-1, color);
+  fillCircleHelper(x+r    , y+r, r, 2, h-2*r-1, color);
+}
+
 
 // fill a rectangle
 void fillRect(short x, short y, short w, short h, char color) {
