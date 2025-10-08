@@ -85,8 +85,9 @@ typedef signed int fix15 ;
 //#define BOUNCINESS 0.5
 #define MAX_BOUNCE 1
 volatile float bounciness = 0.5 ; // initialize bounce
-char bounciness_buffer[20] ; // buffer for snprintf 
+char bounciness_buffer[8] ; // buffer for snprintf 
 volatile float prev_bounciness ;
+//volatile float prev_bounciness2 ;
 
 // SPI configs for the DAC
 #define PIN_CS   5
@@ -116,11 +117,12 @@ char color = RED ;
 #define BALL_SPAWN_X 320
 #define BALL_SPAWN_Y 50
 #define BALL_R  2 // BALL RADIUS
-#define MAX_BALLS 4000 
+#define MAX_BALLS 2510 
 volatile unsigned int active_balls = 1 ;
 volatile unsigned int prev_active_balls ; // keeping track of number of balls 
+//volatile unsigned int prev_active_balls2 ; // keeping track of number of balls 
 volatile unsigned int fallen_balls = 0 ;
-char active_balls_buffer[20] ; // buffer for snprintf 
+char active_balls_buffer[16] ; // buffer for snprintf 
 char fallen_balls_buffer[20] ;
 
 // peg on core 0
@@ -138,6 +140,7 @@ fix15 peg0_y = int2fix15(100) ;
 // static uint32_t begin_time ; // We needed local statics to do fps led
 static uint32_t global_start_time_us;   // When the timer started
 char curr_time_buffer[20] ; // for converting the unint time to buffer
+volatile int updated_values = 0 ;
 
 // histogram variables
 #define NUM_BINS 15
@@ -163,7 +166,7 @@ volatile unsigned int STATE_0 = NOT_PRESSED ;
 #define ADJUST_BOUNCE 2 // to adjust the bounciness
 volatile unsigned int STATE_1 = INIT ; // initalize the state of this fsm
 volatile int btn_pressed = 0 ;
-char state_buffer[20] ; // buffer for snprintf for the current state
+char state_buffer[17] ; // buffer for snprintf for the current state
 volatile int pot_funct = INIT ; // function of potentiometer, initialized at INIT, can be ADJUST_BALLS, ADJUST_BOUNCE
 
 
@@ -182,6 +185,9 @@ struct peg {
 
 struct peg pegs[136] ;
 struct ball balls[MAX_BALLS] ;
+// __attribute__((section(".scratch_x"), aligned(4))); // scratch x -> core 0
+struct ball balls2[MAX_BALLS] ;
+// __attribute__((section(".scratch_y"), aligned(4))); // scratch y -> core 1
 
 // make the thunk noise
 static inline void audio_init() {
@@ -257,6 +263,19 @@ static inline void init_balls() {
   }
 }
 
+// intialize the balls into the array of balls and say no pegs hit
+static inline void init_balls2() {
+  for (int i = 0; i < MAX_BALLS; i++)  {
+    balls2[i].x = int2fix15(BALL_SPAWN_X) ;
+    balls2[i].y = int2fix15(BALL_SPAWN_Y) ;
+    float random_float = (float)rand() / (float)RAND_MAX ;
+    float random_vx_float = (random_float * 0.4f) - 0.2f ;
+    balls2[i].vx = float2fix15(random_vx_float) ;
+    balls2[i].vy = int2fix15(0) ;
+    balls2[i].last_peg = -1 ;
+  }
+}
+
 // create a ball (inline makes it run faster)
 static inline void spawnBall(short ball_idx) {
   // Start ball in center of screen on spawn point
@@ -277,6 +296,28 @@ static inline void spawnBall(short ball_idx) {
 
   // Moving down
   balls[ball_idx].vy = int2fix15(0) ;
+}
+
+// create a ball (inline makes it run faster)
+static inline void spawnBall2(short ball_idx) {
+  // Start ball in center of screen on spawn point
+  balls2[ball_idx].x = int2fix15(BALL_SPAWN_X) ;
+  balls2[ball_idx].y = int2fix15(BALL_SPAWN_Y) ;
+
+  // re init the pegs 
+  balls2[ball_idx].last_peg = -1 ;
+  
+  // Generate random float between 0.0 and 1.0 for small initial vx
+  float random_float = (float)rand() / (float)RAND_MAX ;
+  
+  // Scale float to range of [-0.2, 0.2]
+  float random_vx_float = (random_float * 0.4f) - 0.2f ;
+  
+  // Convert the float to a fixed-point number and assign it to vx
+  balls2[ball_idx].vx = float2fix15(random_vx_float) ;
+
+  // Moving down
+  balls2[ball_idx].vy = int2fix15(0) ;
 }
 
 // create the galton board pegs
@@ -317,14 +358,6 @@ static inline void generateBoard() {
     }
   }
 }
-
-// Draw the boundaries
-// static inline void drawArena() {
-//   drawVLine(10, 10, 600, RED) ;   // left 
-//   drawVLine(630, 10, 600, RED) ;  // Right 
-//   drawHLine(10, 25, 620, RED) ;  // Top
-//   drawHLine(10, 400, 620, RED) ;  // Bottom
-// }
 
 // Detect wallstrikes, update velocity and position
 static inline void wallsAndEdges(short ball_idx) {
@@ -407,9 +440,6 @@ static inline void hitPeg(short ball_idx, short peg_idx)
         }
       }
     } 
-    // else {
-    //   balls[ball_idx].last_peg = -1 ;
-    // }
   }  
 }
 
@@ -437,6 +467,114 @@ static inline void check_collisions_opt(short ball_idx)
   }
 }
 
+
+static inline void wallsAndEdges2(short ball_idx) {
+  // Reverse direction if we've hit a wall
+  if (hitTop(balls2[ball_idx].y)) {
+    balls2[ball_idx].vy = multfix15(float2fix15(bounciness), (-balls2[ball_idx].vy)) ;
+    balls2[ball_idx].y  = (balls2[ball_idx].y + int2fix15(5)) ;
+  }
+  if (hitBottom(balls2[ball_idx].y)) {
+    int x_pos = fix2int15(balls2[ball_idx].x) ; // extract x position of ball
+    //bin_idx = fix2int15(divfix(int2fix15((x_pos - 10) * NUM_BINS), 620));
+    int bin_idx = ((x_pos - 10) * NUM_BINS / 620) ; // normalize the bin index to the size of the arena
+    if (bin_idx < 0) { // edge case for the left side of board
+      bin_idx = 0 ;
+    }
+    if (bin_idx >= NUM_BINS) { // edge case for the right side of the board
+      bin_idx = NUM_BINS - 1;
+    }
+    bins[bin_idx]++; // increment number of balls in the bin
+    spawnBall2(ball_idx) ; 
+    fallen_balls += 1 ;
+  }
+  if (hitRight(balls2[ball_idx].x)) {
+    balls2[ball_idx].vx = multfix15(float2fix15(bounciness), (-balls2[ball_idx].vx)) ;
+    balls2[ball_idx].x  = (balls2[ball_idx].x - int2fix15(5)) ;
+  }
+  if (hitLeft(balls2[ball_idx].x)) {
+    balls2[ball_idx].vx = multfix15(float2fix15(bounciness), (-balls2[ball_idx].vx)) ;
+    balls2[ball_idx].x  = (balls2[ball_idx].x + int2fix15(5)) ;
+  }
+}
+
+static inline void hitPeg2(short ball_idx, short peg_idx) 
+{
+  // because this is the ball radius + peg radius, 
+  // required to see if the x and y distances are less than the collision distance
+  // computing difference in position
+  // Differences in position
+  fix15 dx = balls2[ball_idx].x - pegs[peg_idx].x ;
+  fix15 dy = balls2[ball_idx].y - pegs[peg_idx].y ;
+
+  // Quick bounding-box check (faster than sqrt every time)
+  if ((absfix15(dx) < int2fix15(BALL_R + PEG_R)) && (absfix15(dy) < int2fix15(BALL_R + PEG_R))) {
+    // Full distance check
+    fix15 dist_sq = multfix15(dx, dx) + multfix15(dy, dy) ;
+    fix15 min_dist = int2fix15(BALL_R + PEG_R) ;
+
+    if (dist_sq < multfix15(min_dist, min_dist)) { 
+      fix15 distance = sqrtfix(dist_sq) ;
+
+      if (distance < 1) return ; // avoid dividing by 0
+
+      // Normalized vector from peg to ball
+      fix15 normal_x = divfix(dx, distance) ;
+      fix15 normal_y = divfix(dy, distance) ;
+
+      // Dot product (ball velocity and normal)
+      fix15 dotprod = multfix15(normal_x, balls2[ball_idx].vx) + multfix15(normal_y, balls2[ball_idx].vy) ;
+
+      // Intermediate term per pseudocode
+      fix15 intermediate = -2 * dotprod ;
+
+      if (intermediate > 0) {
+        // Teleport the ball just outside peg surface
+        balls2[ball_idx].x = pegs[peg_idx].x + multfix15(normal_x, (min_dist + int2fix15(1))) ;
+        balls2[ball_idx].y = pegs[peg_idx].y + multfix15(normal_y, (min_dist + int2fix15(1))) ;
+
+        // Update ball velocity
+        balls2[ball_idx].vx = balls2[ball_idx].vx + multfix15(normal_x, intermediate) ;
+        balls2[ball_idx].vy = balls2[ball_idx].vy + multfix15(normal_y, intermediate) ;
+
+        // Lose some energy (BOUNCINESS factor)
+        balls2[ball_idx].vx = multfix15(float2fix15(bounciness), balls2[ball_idx].vx) ;
+        balls2[ball_idx].vy = multfix15(float2fix15(bounciness), balls2[ball_idx].vy) ;
+
+        // Play sound if new peg struck
+        if (balls2[ball_idx].last_peg != peg_idx) {
+          balls2[ball_idx].last_peg = peg_idx ;
+          play_hit_sound() ;
+        }
+      }
+    } 
+  }  
+}
+
+static inline void check_collisions_opt2(short ball_idx) 
+{
+  // Ball's y position determines its approximate row
+  // Pegs are 19px apart vertically, starting at y=100
+  short curr_row = fix2int15(
+    divfix((balls2[ball_idx].y - int2fix15(100)), int2fix15(19))) ;
+  
+  // Safety check for bounds
+  if (curr_row < 0) curr_row = 0 ;
+  if (curr_row > 15) curr_row = 15;
+  
+  // Calculate starting peg idx for curr_row and the next
+  short start_peg = (curr_row * (curr_row + 1)) / 2 ;
+  short end_peg   = ((curr_row + 2) * (curr_row + 3)) / 2 ;
+   
+  // bounds check
+  if (end_peg > 136) end_peg = 136 ;
+  
+  // Only check pegs in two rows
+  for (short peg = start_peg; peg < end_peg; peg++) {
+    hitPeg2(ball_idx, peg);
+  }
+}
+
 // timer function to start the timer at boot
 static inline void initTimer() {
   global_start_time_us = time_us_32();
@@ -461,7 +599,7 @@ static PT_THREAD (protothread_anim(struct pt *pt))
     // set variables for comparison for resetting histogram
     prev_active_balls = active_balls ;
     prev_bounciness = bounciness ;
-
+    
     // initialize the VGA text
     setTextColor(RED) ;
     setTextSize(1) ;
@@ -472,17 +610,16 @@ static PT_THREAD (protothread_anim(struct pt *pt))
 
       generateBoard() ;
       //drawArena() ;
-
       // draw box over old text to erase
-      fillRect(30, 40, 250, 50, BLACK);
+      fillRect(30, 40, 170, 50, BLACK);
       // Generate the text for the screen
       setCursor(30, 40);
       writeString("Balls on screen: ") ;
-      snprintf(active_balls_buffer, 20, "%d", active_balls); // converts int to string
+      snprintf(active_balls_buffer, 16, "%d", (2 * active_balls)); // converts int to string
       writeString(active_balls_buffer) ;
       setCursor(30, 50);
       writeString("Bounciness: ") ;
-      snprintf(bounciness_buffer, 20, "%.2f", bounciness); // converts int to string
+      snprintf(bounciness_buffer, 8, "%.2f", bounciness); // converts int to string
       writeString(bounciness_buffer) ;
       setCursor(30, 60);
       writeString("Balls fallen through: ") ;
@@ -490,7 +627,7 @@ static PT_THREAD (protothread_anim(struct pt *pt))
       writeString(fallen_balls_buffer) ;
       setCursor(30, 70);
       writeString("Time since boot: ") ;
-      snprintf(curr_time_buffer, 20, "%lu", ((time_us_32() - global_start_time_us) / 1000000)); // converts uint time to seconds
+      snprintf(curr_time_buffer, 20, "%u", ((time_us_32() - global_start_time_us) / 1000000)); // converts uint time to seconds
       writeString(curr_time_buffer) ;
 
       // display the current state
@@ -516,6 +653,7 @@ static PT_THREAD (protothread_anim(struct pt *pt))
 
           // draw the ball at its new position
           drawBall(fix2int15(balls[ball].x), fix2int15(balls[ball].y)) ;
+          
         }
       }
 
@@ -536,6 +674,63 @@ static PT_THREAD (protothread_anim(struct pt *pt))
   PT_END(pt);
 } // animation thread
 
+// Animation on core 1, animating the ball bouncing on peg
+static PT_THREAD (protothread_anim2(struct pt *pt))
+{
+    // Mark beginning of thread
+    PT_BEGIN(pt);
+
+    // Variables for maintaining frame rate
+    static uint32_t begin_time ;
+    static int spare_time ;
+    for (int u = 0; u < active_balls; u++) {
+      spawnBall2(u) ;
+    }
+
+    while(1) {
+      // Measure time at start of thread
+      begin_time = time_us_32() ;
+
+      //generateBoard() ;
+      //drawArena() ;
+
+      // update ball's position and velocity
+      // need to do for every ball, then for every peg... nested for loops???
+      for (int ball = 0; ball < MAX_BALLS; ball++) {
+        // erase ball at old position
+        maskBall(fix2int15(balls2[ball].x), fix2int15(balls2[ball].y)) ;
+        if (ball < active_balls) {
+          // Apply gravity to the ball
+          balls2[ball].vy = balls2[ball].vy + float2fix15(GRAVITY_FRACTION) ;
+          balls2[ball].x += balls2[ball].vx ;
+          balls2[ball].y += balls2[ball].vy ;
+          
+          check_collisions_opt2(ball);
+          
+          // Update the walls and edges, and handle wall collisions
+          wallsAndEdges2(ball) ;
+
+          // draw the ball at its new position
+          drawBall(fix2int15(balls2[ball].x), fix2int15(balls2[ball].y)) ;
+        }
+      }
+
+      // delay in accordance with frame rate
+      spare_time = FRAME_RATE - (time_us_32() - begin_time) ;
+
+      // // Check if framerate is met
+      // if (spare_time < 0) {
+      //   gpio_put(LED, 1) ; 
+      // }
+      // else {
+      //   gpio_put(LED, 0) ;
+      // }
+      // // yield for necessary amount of time
+      PT_YIELD_usec(spare_time) ;
+     // NEVER exit while
+    } // END WHILE(1)
+  PT_END(pt);
+} // animation thread 2
 
 static PT_THREAD (protothread_histo(struct pt *pt)) 
 {
@@ -578,28 +773,6 @@ static PT_THREAD (protothread_histo(struct pt *pt))
         drawRect(x_coord, 470 - new_heights[i], bar_width, new_heights[i], RED) ;
 
         old_heights[i] = new_heights[i] ; // update old value regardless
-
-        // // if the bar is growing, draw the addition on top only
-        // if (old_heights[i] < new_heights[i]) { 
-        //   height_difference = new_heights[i] - old_heights[i] ; // the difference between the old height and new height
-        //   // x value is the bucket start, y value is bottom-newheight, width same, only draw the difference
-        //   drawRect(x_coord, 470 - new_heights[i], bar_width, height_difference, RED) ; 
-        //   drawHLine(x_coord, 470 - old_heights[i], bar_width, BLACK) ;
-        // }
-        // // if the bar is getting normalized
-        // else if (old_heights[i] > new_heights[i]) { 
-        //   height_difference = old_heights[i] - new_heights[i] ; // rectangle to get subtracted
-        //   // draw a blackout rectangle over the old bin height to cross it out
-        //   drawRect(x_coord, 470 - old_heights[i], bar_width, height_difference, BLACK) ;
-        //   // draw the red line to complete the height
-        //   drawHLine(x_coord, 470 - new_heights[i], bar_width, RED) ;
-        // }
-        // // else just keep the rectangle the same
-        // else {
-        //   drawRect(x_coord, 470 - new_heights[i], bar_width, new_heights[i], RED) ;
-        // }
-        // old_heights[i] = new_heights[i] ; // update old value regardless
-        // if the bar is growing, draw the addition on top only
       }
       
       // delay in accordance with frame rate
@@ -780,6 +953,32 @@ static PT_THREAD(protothread_potFSM(struct pt *pt))
 } // thread for potentiometer FSM
 
 
+// static PT_THREAD(protothread_text(struct pt *pt)) 
+// {
+//   PT_BEGIN(pt) ;
+  
+//   // Variables for maintaining frame rate
+//   static int spare_time ;
+//   static uint32_t begin_time ;
+
+//   // initialize the VGA text
+//   setTextColor(RED) ;
+//   setTextSize(1) ;
+
+//   while(1) {
+    
+
+//     // delay in accordance with frame rate
+//     spare_time = FRAME_RATE - (time_us_32() - begin_time) ;
+
+//     // yield for necessary amount of time and also more time for every other frame
+//     PT_YIELD_usec(spare_time) ;
+//   }
+
+//   PT_END(pt) ;
+// } // thread for drawing vga text
+
+
 
 // ========================================
 // === Core 1 entry
@@ -795,6 +994,7 @@ void core1_entry()
   pt_add_thread(protothread_pot) ; 
   pt_add_thread(protothread_potFSM) ;
   pt_add_thread(protothread_debouncing) ;
+  pt_add_thread(protothread_anim2);
 
   // start scheduler on core1
   pt_schedule_start ;
@@ -846,6 +1046,7 @@ int main(){
   
   // initialize balls and pegs
   init_balls() ;
+  init_balls2() ;
 
   // start core 1
   multicore_reset_core1();
@@ -854,6 +1055,7 @@ int main(){
   // add threads
   pt_add_thread(protothread_anim);
   pt_add_thread(protothread_histo);
+
 
   // start scheduler
   pt_schedule_start ;
