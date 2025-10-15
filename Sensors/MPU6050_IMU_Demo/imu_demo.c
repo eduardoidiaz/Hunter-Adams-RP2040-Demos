@@ -8,6 +8,7 @@
  * measurements.
  * 
  * HARDWARE CONNECTIONS
+ *  - GPIO 4  ---> PWM Output
  *  - GPIO 16 ---> VGA Hsync
  *  - GPIO 17 ---> VGA Vsync
  *  - GPIO 18 ---> 470 ohm resistor ---> VGA Green
@@ -43,6 +44,22 @@
 #include "mpu6050.h"
 #include "pt_cornell_rp2040_v1_4.h"
 
+// PWM wrap value and clock divide value
+// For a CPU rate of 125 MHz, this gives
+// a PWM frequency of 1 kHz.
+#define WRAPVAL 5000
+#define CLKDIV 25.0f
+
+// GPIO we're using for PWM
+#define PWM_OUT 4
+
+// Variable to hold PWM slice number
+uint slice_num ;
+
+// PWM duty cycle
+volatile int control ;
+volatile int old_control ;
+
 // Arrays in which raw measurements will be stored
 fix15 acceleration[3], gyro[3];
 
@@ -69,12 +86,13 @@ uint slice_num ;
 void on_pwm_wrap() {
 
     // Clear the interrupt flag that brought us here
-    pwm_clear_irq(pwm_gpio_to_slice_num(5));
+    pwm_clear_irq(pwm_gpio_to_slice_num(PWM_OUT));
+    // Update duty cycle
+    if (control!=old_control) {
+        old_control = control ;
+        pwm_set_chan_level(slice_num, PWM_CHAN_A, control);
+    }
 
-    // Read the IMU
-    // NOTE! This is in 15.16 fixed point. Accel in g's, gyro in deg/s
-    // If you want these values in floating point, call fix2float15() on
-    // the raw measurements.
     mpu6050_read_raw(acceleration, gyro);
 
     // Signal VGA to draw
@@ -203,6 +221,7 @@ static PT_THREAD (protothread_serial(struct pt *pt))
 // Entry point for core 1
 void core1_entry() {
     pt_add_thread(protothread_vga) ;
+    pt_add_thread(protothread_serial) ;
     pt_schedule_start ;
 }
 
@@ -235,11 +254,11 @@ int main() {
     ///////////////////////// PWM CONFIGURATION ////////////////////////////
     ////////////////////////////////////////////////////////////////////////
     // Tell GPIO's 4,5 that they allocated to the PWM
-    gpio_set_function(5, GPIO_FUNC_PWM);
+    //gpio_set_function(5, GPIO_FUNC_PWM);
     gpio_set_function(4, GPIO_FUNC_PWM);
 
     // Find out which PWM slice is connected to GPIO 5 (it's slice 2, same for 4)
-    slice_num = pwm_gpio_to_slice_num(5);
+    slice_num = pwm_gpio_to_slice_num(4); // or 5?
 
     // Mask our slice's IRQ output into the PWM block's single interrupt line,
     // and register our interrupt handler
@@ -252,8 +271,11 @@ int main() {
     pwm_set_wrap(slice_num, WRAPVAL) ;
     pwm_set_clkdiv(slice_num, CLKDIV) ;
 
+    // Invert the PWM output
+    pwm_set_output_polarity(slice_num, 0, 1) ;
+
     // This sets duty cycle
-    pwm_set_chan_level(slice_num, PWM_CHAN_B, 0);
+    //pwm_set_chan_level(slice_num, PWM_CHAN_B, 0);
     pwm_set_chan_level(slice_num, PWM_CHAN_A, 0);
 
     // Start the channel
