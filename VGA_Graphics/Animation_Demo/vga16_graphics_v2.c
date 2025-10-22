@@ -69,6 +69,8 @@ char textcolor, textbgcolor, wrap;
 // Screen width/height
 #define _width 640
 #define _height 480
+#define BALL_R 1
+#define PEG_R  6
 
 void initVGA() {
         // Choose which PIO instance to use (there are two instances, each with 4 state machines)
@@ -204,6 +206,55 @@ void drawPixel(short x, short y, char color) {
     }
 }
 
+// A function for drawing a pixel with a specified color.
+// Note that because information is passed to the PIO state machines through
+// a DMA channel, we only need to modify the contents of the array and the
+// pixels will be automatically updated on the screen.
+void drawRedPixel(short x, short y) {
+    // Range checks (640x480 display)
+    // if (x > 639) x = 639 ;
+    // if (x < 0) x = 0 ;
+    // if (y < 0) y = 0 ;
+    // if (y > 479) y = 479 ;
+
+    // Which pixel is it?
+    int pixel = ((640 * y) + x) ;
+
+    // Is this pixel stored in the first 4 bits
+    // of the vga data array index, or the second
+    // 4 bits? Check, then mask.
+    if (pixel & 1) {
+        vga_data_array[pixel>>1] = (vga_data_array[pixel>>1] & TOPMASK) | (RED << 4) ;
+    }
+    else {
+        vga_data_array[pixel>>1] = (vga_data_array[pixel>>1] & BOTTOMMASK) | (RED) ;
+    }
+}
+
+// A function for drawing a pixel with a specified color.
+// Note that because information is passed to the PIO state machines through
+// a DMA channel, we only need to modify the contents of the array and the
+// pixels will be automatically updated on the screen.
+void drawBlackPixel(short x, short y) {
+    // Range checks (640x480 display)
+    // if (x > 639) x = 639 ;
+    // if (x < 0) x = 0 ;
+    // if (y < 0) y = 0 ;
+    // if (y > 479) y = 479 ;
+
+    // Which pixel is it?
+    int pixel = ((640 * y) + x) ;
+
+    // Is this pixel stored in the first 4 bits
+    // of the vga data array index, or the second
+    // 4 bits? Check, then mask.
+    if (pixel & 1) {
+        vga_data_array[pixel>>1] = (vga_data_array[pixel>>1] & TOPMASK) | (BLACK << 4) ;
+    }
+    else {
+        vga_data_array[pixel>>1] = (vga_data_array[pixel>>1] & BOTTOMMASK) | (BLACK) ;
+    }
+}
 
 void drawVLine(short x, short y, short h, char color) {
     for (short i=y; i<(y+h); i++) {
@@ -352,6 +403,96 @@ void drawCircle(short x0, short y0, short r, char color) {
     drawPixel(x0 + y, y0 - x, color);
     drawPixel(x0 - y, y0 - x, color);
   }
+}
+
+void drawBall(short x0, short y0) {
+/* Draw a circle outline with center (x0,y0) and radius 1, with given color
+ * Parameters:
+ *      x0: x-coordinate of center of circle. The top-left of the screen
+ *          has x-coordinate 0 and increases to the right
+ *      y0: y-coordinate of center of circle. The top-left of the screen
+ *          has y-coordinate 0 and increases to the bottom
+ *      color: 16-bit color value for the circle. Note that the circle
+ *          isn't filled. So, this is the color of the outline of the circle
+ * Returns: Nothing
+ */
+
+  drawRedPixel(x0  , y0+BALL_R);
+  drawRedPixel(x0  , y0-BALL_R);
+  drawRedPixel(x0+BALL_R, y0  );
+  drawRedPixel(x0-BALL_R, y0  );
+}
+
+void maskBall(short x0, short y0) {
+/* Draw a circle outline with center (x0,y0) and radius 1, with given color
+ * Parameters:
+ *      x0: x-coordinate of center of circle. The top-left of the screen
+ *          has x-coordinate 0 and increases to the right
+ *      y0: y-coordinate of center of circle. The top-left of the screen
+ *          has y-coordinate 0 and increases to the bottom
+ *      color: 16-bit color value for the circle. Note that the circle
+ *          isn't filled. So, this is the color of the outline of the circle
+ * Returns: Nothing
+ */
+
+  drawBlackPixel(x0  , y0+BALL_R);
+  drawBlackPixel(x0  , y0-BALL_R);
+  drawBlackPixel(x0+BALL_R, y0  );
+  drawBlackPixel(x0-BALL_R, y0  );
+}
+
+void drawPeg(short x0, short y0) {
+/* Draw a circle outline with center (x0,y0) and radius 6, with given color
+ * Parameters:
+ *      x0: x-coordinate of center of circle. The top-left of the screen
+ *          has x-coordinate 0 and increases to the right
+ *      y0: y-coordinate of center of circle. The top-left of the screen
+ *          has y-coordinate 0 and increases to the bottom
+ *      color: 16-bit color value for the circle. Note that the circle
+ *          isn't filled. So, this is the color of the outline of the circle
+ * Returns: Nothing
+ */
+// Cardinal points
+  drawRedPixel(x0, y0 + 6);
+  drawRedPixel(x0, y0 - 6);
+  drawRedPixel(x0 + 6, y0);
+  drawRedPixel(x0 - 6, y0);
+
+  // Offsets from (x=1, y=6)
+  drawRedPixel(x0 + 1, y0 + 6);
+  drawRedPixel(x0 - 1, y0 + 6);
+  drawRedPixel(x0 + 1, y0 - 6);
+  drawRedPixel(x0 - 1, y0 - 6);
+  drawRedPixel(x0 + 6, y0 + 1);
+  drawRedPixel(x0 - 6, y0 + 1);
+  drawRedPixel(x0 + 6, y0 - 1);
+  drawRedPixel(x0 - 6, y0 - 1);
+
+  // Offsets from (x=2, y=6)
+  drawRedPixel(x0 + 2, y0 + 6);
+  drawRedPixel(x0 - 2, y0 + 6);
+  drawRedPixel(x0 + 2, y0 - 6);
+  drawRedPixel(x0 - 2, y0 - 6);
+  drawRedPixel(x0 + 6, y0 + 2);
+  drawRedPixel(x0 - 6, y0 + 2);
+  drawRedPixel(x0 + 6, y0 - 2);
+  drawRedPixel(x0 - 6, y0 - 2);
+
+  // Offsets from (x=3, y=5)
+  drawRedPixel(x0 + 3, y0 + 5);
+  drawRedPixel(x0 - 3, y0 + 5);
+  drawRedPixel(x0 + 3, y0 - 5);
+  drawRedPixel(x0 - 3, y0 - 5);
+  drawRedPixel(x0 + 5, y0 + 3);
+  drawRedPixel(x0 - 5, y0 + 3);
+  drawRedPixel(x0 + 5, y0 - 3);
+  drawRedPixel(x0 - 5, y0 - 3);
+
+  // Offsets from (x=4, y=4)
+  drawRedPixel(x0 + 4, y0 + 4);
+  drawRedPixel(x0 - 4, y0 + 4);
+  drawRedPixel(x0 + 4, y0 - 4);
+  drawRedPixel(x0 - 4, y0 - 4);
 }
 
 void drawCircleHelper( short x0, short y0, short r, unsigned char cornername, char color) {

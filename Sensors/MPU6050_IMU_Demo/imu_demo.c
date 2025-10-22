@@ -8,6 +8,7 @@
  * measurements.
  * 
  * HARDWARE CONNECTIONS
+ *  - GPIO 4  ---> PWM Output
  *  - GPIO 16 ---> VGA Hsync
  *  - GPIO 17 ---> VGA Vsync
  *  - GPIO 18 ---> 470 ohm resistor ---> VGA Green
@@ -43,8 +44,46 @@
 #include "mpu6050.h"
 #include "pt_cornell_rp2040_v1_4.h"
 
+// PWM wrap value and clock divide value
+// For a CPU rate of 125 MHz, this gives
+// a PWM frequency of 1 kHz.
+#define WRAPVAL 5000
+
+// GPIO we're using for PWM
+#define PWM_OUT 4
+
+// Variable to hold PWM slice number
+uint slice_num ;
+
+// PWM duty cycle
+volatile int control ;
+volatile int old_control ;
+
 // Arrays in which raw measurements will be stored
-fix15 acceleration[3], gyro[3];
+fix15 acceleration[3], gyro[3] ;
+
+// Complementary Filter vars
+volatile float comp_angle_roll = 0.0 ; // filtered angle degrees
+const float dt = 0.001 ; // time step in seconds (1.0/1000 Hz)
+const float percent_gyro = 0.98 ; // filter coefficient (how much of gyro to mix in)
+const float GYRO_SCALE = 131.0 ; // Gyro scale factor for +- 1000 dps
+
+// P-controller vars
+volatile float targ_ang = 0.0 ;
+volatile float Kp = 10.0 ;
+const int pwm_max = WRAPVAL ;
+const int pwm_min = 0 ;
+const int pwm_neut = 2300;
+
+// other controller vars
+volatile float Ki = 0.5 ;
+volatile float integral_term = 0.1 ;
+volatile float Kd = 5.0 ;
+volatile float prev_error = 0 ;
+
+// lowpass control signal vars
+volatile float filt_control = pwm_neut ;
+const float control_filt_coeff = 0.01 ;
 
 // character array
 char screentext[40];
@@ -62,7 +101,7 @@ static struct pt_sem vga_semaphore ;
 
 // Some paramters for PWM
 #define WRAPVAL 5000
-#define CLKDIV  35.0f
+#define CLKDIV  30.0f
 #define PWM_OUT 4
 
 // Variable to hold PWM slice number
@@ -72,22 +111,74 @@ uint slice_num ;
 volatile int control ;
 volatile int old_control ;
 
-// variables for PID
-volatile int prop_gain ; // tuning current error (tune first)
-volatile int diff_gain ; // supresses overshoot and oscillations
-volatile float int_gain ; // for tuning steady state error
-
 // PWM Interrupt service routine
 void on_pwm_wrap() {
-    control = 2500 ;
     // Clear the interrupt flag that brought us here
     pwm_clear_irq(slice_num);
-
-    // Read the IMU
-    // NOTE! This is in 15.16 fixed point. Accel in g's, gyro in deg/s
-    // If you want these values in floating point, call fix2float15() on
-    // the raw measurements.
+    
     mpu6050_read_raw(acceleration, gyro);
+
+    /////////////// COMP FILTER BEGIN /////////////////////
+    // convert raw fix15 values 
+    float gyro_x_rate = fix2float15(gyro[0]) / GYRO_SCALE ; // DPS
+    float acc_y = fix2float15(acceleration[1]) ;
+    float acc_z = fix2float15(acceleration[2]) ;
+
+    // Calculate accel angle
+    // atan2f in rad, * (180/pi) to degrees
+    float accel_angle_roll = atan2f(acc_z, acc_y) * (180.0 / M_PI) - 90.0;
+
+    // calculate gyro angle from gyroscope
+    // prev_angle + (rate * dt)
+    float gyro_angle_roll = comp_angle_roll + (gyro_x_rate * dt) ;
+
+    // do complementary filtering
+    comp_angle_roll = percent_gyro * gyro_angle_roll 
+    + (1.0 - percent_gyro) * accel_angle_roll ;
+    /////////////// COMP FILTER END ////////////////////////
+
+    ///////////////   PI CONTROLLER  ////////////////////////
+    float error = targ_ang - comp_angle_roll ;
+    
+    // prop term calc
+    float p_term = Kp * error ;
+
+    // int term calc
+    float i_term = Ki * integral_term ;
+
+    // deriv term calc
+    float derivative = (error - prev_error) / dt ;
+    float d_term = Kd * derivative ;
+    prev_error = error ;
+
+    // Calc control signal 
+    int new_control =  pwm_neut + (int)p_term + (int)i_term + (int)d_term;
+
+    // Constrain to pwm range
+    int constrained_control = new_control ;
+    if (new_control > pwm_max) new_control = pwm_max ;
+    else if (new_control < pwm_min) new_control = pwm_min ;
+
+    // Anti windup
+    if (constrained_control == new_control) {
+        integral_term += (error * dt) ;
+    }
+    // allow integral to change on edges of pwm range but not outside
+    else if ((constrained_control == pwm_max) && (error < 0)) {
+        integral_term += (error * dt);
+    }
+    else if ((constrained_control == pwm_min) && (error > 0)) {
+        integral_term += (error * dt) ;
+    }
+
+    new_control = constrained_control ;
+
+    // LOW PASS FILTER
+    filt_control = (control_filt_coeff * (float) new_control) + ((1.0 - control_filt_coeff) * filt_control) ;
+
+    // Update volatile control var to enact pwm changes calculated
+    control = (int)filt_control ;
+    ///////////////  END CONTROLLER ////////////////////////
 
     // Signal VGA to draw
     PT_SEM_SIGNAL(pt, &vga_semaphore);
@@ -107,12 +198,20 @@ static PT_THREAD (protothread_vga(struct pt *pt))
 
     // We will start drawing at column 81
     static int xcoord = 81 ;
-    
-    // Rescale the measurements for display
-    static float OldRange = 500. ; // (+/- 250)
-    static float NewRange = 150. ; // (looks nice on VGA)
-    static float OldMin = -250. ;
-    static float OldMax = 250. ;
+
+    // Angle Plot params
+    static float min_angle = -90.0 ;
+    static float angle_range = 180.0 ;
+    static int angle_y_bot = 230 ;
+    static int angle_y_top = 80 ;
+    static int angle_px_h = 150 ;
+
+    // Motor Plot params
+    static float motor_min = 0.0 ;
+    static float motor_rng = WRAPVAL ;
+    static int motor_y_bot = 430 ;
+    static int motor_y_top = 280 ;
+    static int motor_px_h = 150 ;
 
     // Control rate of drawing
     static int throttle ;
@@ -126,13 +225,13 @@ static PT_THREAD (protothread_vga(struct pt *pt))
     drawHLine(75, 355, 5, CYAN) ;
     drawHLine(75, 280, 5, CYAN) ;
     drawVLine(80, 280, 150, CYAN) ;
+    sprintf(screentext, "2500") ;
+    setCursor(45, 350) ;
+    writeString(screentext) ;
+    sprintf(screentext, "5000") ;
+    setCursor(45, 280) ;
+    writeString(screentext) ;
     sprintf(screentext, "0") ;
-    setCursor(50, 350) ;
-    writeString(screentext) ;
-    sprintf(screentext, "+2") ;
-    setCursor(50, 280) ;
-    writeString(screentext) ;
-    sprintf(screentext, "-2") ;
     setCursor(50, 425) ;
     writeString(screentext) ;
 
@@ -144,10 +243,10 @@ static PT_THREAD (protothread_vga(struct pt *pt))
     sprintf(screentext, "0") ;
     setCursor(50, 150) ;
     writeString(screentext) ;
-    sprintf(screentext, "+250") ;
+    sprintf(screentext, "+90") ;
     setCursor(45, 75) ;
     writeString(screentext) ;
-    sprintf(screentext, "-250") ;
+    sprintf(screentext, "-90") ;
     setCursor(45, 225) ;
     writeString(screentext) ;
     
@@ -155,6 +254,15 @@ static PT_THREAD (protothread_vga(struct pt *pt))
     while (true) {
         // Wait on semaphore
         PT_SEM_WAIT(pt, &vga_semaphore);
+
+        // debug angle calc reading
+        setCursor(150, 50) ;
+        fillRect(240, 50, 50, 20, BLACK) ;
+        char angle_buffer[6];
+        char angle_out[22] = "measured angle: " ;
+        sprintf(angle_buffer, "%2.2f", comp_angle_roll) ;
+        strcat(angle_out, angle_buffer);
+        writeString(angle_out) ;
         // Increment drawspeed controller
         throttle += 1 ;
         // If the controller has exceeded a threshold, draw
@@ -165,15 +273,18 @@ static PT_THREAD (protothread_vga(struct pt *pt))
             // Erase a column
             drawVLine(xcoord, 0, 480, BLACK) ;
 
-            // Draw bottom plot (multiply by 120 to scale from +/-2 to +/-250)
-            drawPixel(xcoord, 430 - (int)(NewRange*((float)((fix2float15(acceleration[0])*120.0)-OldMin)/OldRange)), WHITE) ;
-            drawPixel(xcoord, 430 - (int)(NewRange*((float)((fix2float15(acceleration[1])*120.0)-OldMin)/OldRange)), RED) ;
-            drawPixel(xcoord, 430 - (int)(NewRange*((float)((fix2float15(acceleration[2])*120.0)-OldMin)/OldRange)), GREEN) ;
+            // Draw bottom plot (motor sig)
+            int motor_y = motor_y_bot - (int)(motor_px_h * ((float)control - motor_min) / motor_rng) ;
+            // plot bounding
+            if (motor_y < motor_y_top) motor_y = motor_y_top ;
+            if (motor_y > motor_y_bot) motor_y = motor_y_bot ;
+            drawPixel(xcoord, motor_y, RED) ;
 
-            // Draw top plot
-            drawPixel(xcoord, 230 - (int)(NewRange*((float)((fix2float15(gyro[0]))-OldMin)/OldRange)), WHITE) ;
-            drawPixel(xcoord, 230 - (int)(NewRange*((float)((fix2float15(gyro[1]))-OldMin)/OldRange)), RED) ;
-            drawPixel(xcoord, 230 - (int)(NewRange*((float)((fix2float15(gyro[2]))-OldMin)/OldRange)), GREEN) ;
+            // draw top plot (angle)
+            int angle_y = angle_y_bot - (int)(angle_px_h * ((comp_angle_roll - min_angle) / angle_range)) ;
+            if (angle_y < angle_y_top) angle_y = angle_y_top ;
+            if (angle_y > angle_y_bot) angle_y = angle_y_bot ;
+            drawPixel(xcoord, angle_y, WHITE) ;
 
             // Update horizontal cursor
             if (xcoord < 609) {
@@ -187,99 +298,6 @@ static PT_THREAD (protothread_vga(struct pt *pt))
     // Indicate end of thread
     PT_END(pt);
 }
-
-/*
-// Thread that draws to VGA display
-static PT_THREAD (protothread_vga(struct pt *pt))
-{
-    // Indicate start of thread
-    PT_BEGIN(pt) ;
-
-    // We will start drawing at column 81
-    static int xcoord = 81 ;
-    
-    // Rescale the measurements for display
-    static float OldRange = 500. ; // (+/- 250)
-    static float NewRange = 150. ; // (looks nice on VGA)
-    static float OldMin = -250. ;
-    static float OldMax = 250. ;
-
-    // Control rate of drawing
-    static int throttle ;
-
-    // Draw the static aspects of the display
-    setTextSize(1) ;
-    setTextColor(WHITE);
-
-    // Draw bottom plot
-    drawHLine(75, 430, 5, CYAN) ;
-    drawHLine(75, 355, 5, CYAN) ;
-    drawHLine(75, 280, 5, CYAN) ;
-    drawVLine(80, 280, 150, CYAN) ;
-    sprintf(screentext, "0") ;
-    setCursor(50, 350) ;
-    writeString(screentext) ;
-    sprintf(screentext, "+2") ;
-    setCursor(50, 280) ;
-    writeString(screentext) ;
-    sprintf(screentext, "-2") ;
-    setCursor(50, 425) ;
-    writeString(screentext) ;
-
-    // Draw top plot
-    drawHLine(75, 230, 5, CYAN) ;
-    drawHLine(75, 155, 5, CYAN) ;
-    drawHLine(75, 80, 5, CYAN) ;
-    drawVLine(80, 80, 150, CYAN) ;
-    sprintf(screentext, "0") ;
-    setCursor(50, 150) ;
-    writeString(screentext) ;
-    sprintf(screentext, "+250") ;
-    setCursor(45, 75) ;
-    writeString(screentext) ;
-    sprintf(screentext, "-250") ;
-    setCursor(45, 225) ;
-    writeString(screentext) ;
-    
-
-    while (true) {
-        // Wait on semaphore
-        PT_SEM_WAIT(pt, &vga_semaphore);
-        // Increment drawspeed controller
-        throttle += 1 ;
-        // If the controller has exceeded a threshold, draw
-        if (throttle >= threshold) { 
-            // Zero drawspeed controller
-            throttle = 0 ;
-
-            // Erase a column
-            drawVLine(xcoord, 0, 480, BLACK) ;
-
-            // Draw bottom plot (multiply by 120 to scale from +/-2 to +/-250)
-            drawPixel(xcoord, 430 - (int)(NewRange*((float)((fix2float15(acceleration[0])*120.0)-OldMin)/OldRange)), WHITE) ;
-            drawPixel(xcoord, 430 - (int)(NewRange*((float)((fix2float15(acceleration[1])*120.0)-OldMin)/OldRange)), RED) ;
-            drawPixel(xcoord, 430 - (int)(NewRange*((float)((fix2float15(acceleration[2])*120.0)-OldMin)/OldRange)), GREEN) ;
-
-            // Draw top plot
-            drawPixel(xcoord, 230 - (int)(NewRange*((float)((fix2float15(gyro[0]))-OldMin)/OldRange)), WHITE) ;
-            drawPixel(xcoord, 230 - (int)(NewRange*((float)((fix2float15(gyro[1]))-OldMin)/OldRange)), RED) ;
-            drawPixel(xcoord, 230 - (int)(NewRange*((float)((fix2float15(gyro[2]))-OldMin)/OldRange)), GREEN) ;
-
-            // Update horizontal cursor
-            if (xcoord < 609) {
-                xcoord += 1 ;
-            }
-            else {
-                xcoord = 81 ;
-            }
-        }
-    }
-    // Indicate end of thread
-    PT_END(pt);
-}
-
-
-*/
 
 // User input thread. User can change draw speed
 static PT_THREAD (protothread_serial(struct pt *pt))
@@ -289,16 +307,15 @@ static PT_THREAD (protothread_serial(struct pt *pt))
     static int test_in ;
     static float float_in ;
     while(1) {
-        sprintf(pt_serial_out_buffer, "input a command: ");
+        sprintf(pt_serial_out_buffer, "Commands: [t]hresh, [a]ngle, [p]gain, [i]gain, [d]gain");
         serial_write ;
         // spawn a thread to do the non-blocking serial read
         serial_read ;
         // convert input string to number
         sscanf(pt_serial_in_buffer,"%c", &classifier) ;
 
-        // num_independents = test_in ;
-        if (classifier=='t') {
-            sprintf(pt_serial_out_buffer, "timestep: ");
+        if (classifier =='t') {
+            sprintf(pt_serial_out_buffer, "Timestep: ");
             serial_write ;
             serial_read ;
             // convert input string to number
@@ -307,27 +324,47 @@ static PT_THREAD (protothread_serial(struct pt *pt))
                 threshold = test_in ;
             }
         }
-        // // get PID gains
-        // sprintf(pt_serial_out_buffer, "input a proportional gain (Kp): ");
-        // serial_write ;
-        // // spawn a thread to do the non-blocking serial read
-        // serial_read ;
-        // // convert input string to number
-        // sscanf(pt_serial_in_buffer,"%d", &prop_gain) ;
-        
-        // sprintf(pt_serial_out_buffer, "input a differential gain (Kd): ");
-        // serial_write ;
-        // // spawn a thread to do the non-blocking serial read
-        // serial_read ;
-        // // convert input string to number
-        // sscanf(pt_serial_in_buffer,"%d", &diff_gain) ;
-
-        // sprintf(pt_serial_out_buffer, "input a integral gain (Ki): ");
-        // serial_write ;
-        // // spawn a thread to do the non-blocking serial read
-        // serial_read ;
-        // // convert input string to number
-        // sscanf(pt_serial_in_buffer,"%f", &int_gain) ;
+        else if (classifier == 'a') {
+            sprintf(pt_serial_out_buffer, "Enter target angle (float): ") ;
+            serial_write ;
+            serial_read ;
+            sscanf(pt_serial_in_buffer, "%f", &float_in) ;
+            targ_ang = float_in ;
+            integral_term = 0.0 ; // reset integral term for new target
+            prev_error = 0.0 ; // same for derivative
+            sprintf(pt_serial_out_buffer, "Target angle set to %.2f\n", targ_ang) ;
+            serial_write ;
+        }
+        else if (classifier =='p') {
+            sprintf(pt_serial_out_buffer, "Proportional Gain (float): ");
+            serial_write ;
+            serial_read ;
+            // convert input string to number
+            sscanf(pt_serial_in_buffer,"%f", &float_in) ;
+            Kp = float_in ;
+            sprintf(pt_serial_out_buffer, "Kp set to: %.2f\n", Kp) ;
+            serial_write ;
+        }
+        else if (classifier == 'i') {
+            sprintf(pt_serial_out_buffer, "input a integral gain (Ki): ");
+            serial_write ;
+            serial_read ;
+            // convert input string to number
+            sscanf(pt_serial_in_buffer,"%f", &float_in) ;
+            Ki = float_in ;
+            sprintf(pt_serial_out_buffer, "Ki set to %.2f\n", Ki) ;
+            serial_write ;
+        }
+        else if (classifier == 'd') {
+            sprintf(pt_serial_out_buffer, "input a derivative gain (Kd): ");
+            serial_write ;
+            serial_read ;
+            // convert input string to number
+            sscanf(pt_serial_in_buffer,"%f", &float_in) ;
+            Kd = float_in ;
+            sprintf(pt_serial_out_buffer, "Kd set to %.2f\n", Kd) ;
+            serial_write ;
+        }
     }
     PT_END(pt) ;
 }
@@ -355,10 +392,6 @@ int main() {
     gpio_set_function(SDA_PIN, GPIO_FUNC_I2C) ;
     gpio_set_function(SCL_PIN, GPIO_FUNC_I2C) ;
 
-    // Pullup resistors on breakout board, don't need to turn on internals
-    // gpio_pull_up(SDA_PIN) ;
-    // gpio_pull_up(SCL_PIN) ;
-
     // MPU6050 initialization
     mpu6050_reset();
     mpu6050_read_raw(acceleration, gyro);
@@ -384,6 +417,9 @@ int main() {
     pwm_set_wrap(slice_num, WRAPVAL) ;
     pwm_set_clkdiv(slice_num, CLKDIV) ;
 
+    // Invert the PWM output
+    pwm_set_output_polarity(slice_num, 0, 1) ;
+
     // This sets duty cycle
     //pwm_set_chan_level(slice_num, PWM_CHAN_B, 0);
     pwm_set_chan_level(slice_num, PWM_CHAN_A, 0);
@@ -402,5 +438,4 @@ int main() {
     // start core 0
     pt_add_thread(protothread_serial) ;
     pt_schedule_start ;
-
 }

@@ -91,7 +91,10 @@ int main() {
 
     // This section configures the period of the PWM signals
     pwm_set_wrap(slice_num, WRAPVAL) ;
-    pwm_set_clkdiv(slice_num, CLKDIV) ;
+    pwm_set_clkdiv(slice_num, CLKDIV) ; // meow
+
+    // Invert the PWM output
+    pwm_set_output_polarity(slice_num, 0, 1) ;
 
     // This sets duty cycle
     pwm_set_chan_level(slice_num, PWM_CHAN_A, 3125);
