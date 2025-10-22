@@ -44,16 +44,12 @@
 #include "mpu6050.h"
 #include "pt_cornell_rp2040_v1_4.h"
 
-// PWM wrap value and clock divide value
-// For a CPU rate of 125 MHz, this gives
-// a PWM frequency of 1 kHz.
-#define WRAPVAL 5000
-
-// GPIO we're using for PWM
-#define PWM_OUT 4
-
 // Variable to hold PWM slice number
 uint slice_num ;
+// Some paramters for PWM
+#define WRAPVAL 5000
+#define CLKDIV  30.0f
+#define PWM_OUT 4
 
 // PWM duty cycle
 volatile int control ;
@@ -65,25 +61,27 @@ fix15 acceleration[3], gyro[3] ;
 // Complementary Filter vars
 volatile float comp_angle_roll = 0.0 ; // filtered angle degrees
 const float dt = 0.001 ; // time step in seconds (1.0/1000 Hz)
-const float percent_gyro = 0.98 ; // filter coefficient (how much of gyro to mix in)
-const float GYRO_SCALE = 131.0 ; // Gyro scale factor for +- 1000 dps
+const float percent_gyro = 0.90 ; // filter coefficient (how much of gyro to mix in)
 
 // P-controller vars
 volatile float targ_ang = 0.0 ;
-volatile float Kp = 10.0 ;
+volatile float Kp = 42.0 ;
 const int pwm_max = WRAPVAL ;
 const int pwm_min = 0 ;
-const int pwm_neut = 2300;
+const int pwm_neut = 2500;
 
 // other controller vars
-volatile float Ki = 0.5 ;
-volatile float integral_term = 0.1 ;
-volatile float Kd = 5.0 ;
-volatile float prev_error = 0 ;
+volatile float Ki = 0.0 ;
+volatile float integral_term = 0.0 ;
+volatile float Kd = 2.0 ;
+volatile float d_term = 0.0 ;
+static int d_term_count = 0 ;
+volatile float prev_angle = 0 ;
+const float integral_deadband = 25.0 ;
 
 // lowpass control signal vars
 volatile float filt_control = pwm_neut ;
-const float control_filt_coeff = 0.01 ;
+const float control_filt_coeff = 0.3 ;
 
 // character array
 char screentext[40];
@@ -99,14 +97,6 @@ int threshold = 10 ;
 // semaphore
 static struct pt_sem vga_semaphore ;
 
-// Some paramters for PWM
-#define WRAPVAL 5000
-#define CLKDIV  30.0f
-#define PWM_OUT 4
-
-// Variable to hold PWM slice number
-uint slice_num ;
-
 // PWM duty cycle vars
 volatile int control ;
 volatile int old_control ;
@@ -120,7 +110,7 @@ void on_pwm_wrap() {
 
     /////////////// COMP FILTER BEGIN /////////////////////
     // convert raw fix15 values 
-    float gyro_x_rate = fix2float15(gyro[0]) / GYRO_SCALE ; // DPS
+    float gyro_x_rate = fix2float15(gyro[0]) ; // DPS
     float acc_y = fix2float15(acceleration[1]) ;
     float acc_z = fix2float15(acceleration[2]) ;
 
@@ -137,7 +127,7 @@ void on_pwm_wrap() {
     + (1.0 - percent_gyro) * accel_angle_roll ;
     /////////////// COMP FILTER END ////////////////////////
 
-    ///////////////   PI CONTROLLER  ////////////////////////
+    ///////////////   PID CONTROLLER  ////////////////////////
     float error = targ_ang - comp_angle_roll ;
     
     // prop term calc
@@ -147,31 +137,39 @@ void on_pwm_wrap() {
     float i_term = Ki * integral_term ;
 
     // deriv term calc
-    float derivative = (error - prev_error) / dt ;
-    float d_term = Kd * derivative ;
-    prev_error = error ;
+    // float derivative = (comp_angle_roll - prev_angle) / dt ;
+    // float d_term = Kd * derivative ;
+    // prev_angle = comp_angle_roll ;
+    d_term_count++;
+    if (d_term_count > 2) {
+        float derivative = (comp_angle_roll - prev_angle) / (dt * 3.0) ;
+        d_term = Kd * derivative ;
+        prev_angle = comp_angle_roll ;
+        d_term_count = 0 ;
+    }
 
     // Calc control signal 
-    int new_control =  pwm_neut + (int)p_term + (int)i_term + (int)d_term;
+    int new_control =  pwm_neut + (int)(p_term + i_term - d_term);
 
     // Constrain to pwm range
     int constrained_control = new_control ;
     if (new_control > pwm_max) new_control = pwm_max ;
     else if (new_control < pwm_min) new_control = pwm_min ;
 
-    // Anti windup
-    if (constrained_control == new_control) {
+    // Anti windup/deadzone overshoot fix
+    if (fabs(error) > integral_deadband) {
+        integral_term = 0.0 ;
+    }
+    else if (constrained_control == new_control) {
         integral_term += (error * dt) ;
     }
-    // allow integral to change on edges of pwm range but not outside
-    else if ((constrained_control == pwm_max) && (error < 0)) {
+    // allow integral to change on edges of pwm range
+    else if ((constrained_control > pwm_max) && (error < 0)) {
         integral_term += (error * dt);
     }
-    else if ((constrained_control == pwm_min) && (error > 0)) {
+    else if ((constrained_control < pwm_min) && (error > 0)) {
         integral_term += (error * dt) ;
     }
-
-    new_control = constrained_control ;
 
     // LOW PASS FILTER
     filt_control = (control_filt_coeff * (float) new_control) + ((1.0 - control_filt_coeff) * filt_control) ;
@@ -274,7 +272,7 @@ static PT_THREAD (protothread_vga(struct pt *pt))
             drawVLine(xcoord, 0, 480, BLACK) ;
 
             // Draw bottom plot (motor sig)
-            int motor_y = motor_y_bot - (int)(motor_px_h * ((float)control - motor_min) / motor_rng) ;
+            int motor_y = motor_y_bot - (int)(motor_px_h * ((float)filt_control - motor_min) / motor_rng) ;
             // plot bounding
             if (motor_y < motor_y_top) motor_y = motor_y_top ;
             if (motor_y > motor_y_bot) motor_y = motor_y_bot ;
@@ -331,7 +329,6 @@ static PT_THREAD (protothread_serial(struct pt *pt))
             sscanf(pt_serial_in_buffer, "%f", &float_in) ;
             targ_ang = float_in ;
             integral_term = 0.0 ; // reset integral term for new target
-            prev_error = 0.0 ; // same for derivative
             sprintf(pt_serial_out_buffer, "Target angle set to %.2f\n", targ_ang) ;
             serial_write ;
         }
@@ -394,7 +391,22 @@ int main() {
 
     // MPU6050 initialization
     mpu6050_reset();
-    mpu6050_read_raw(acceleration, gyro);
+    // let sensor stabilize and then seed with data for smooth start
+    sleep_ms(100);
+    for (int i = 0; i < 10 ; i++) {
+        mpu6050_read_raw(acceleration, gyro);
+        sleep_ms(10);
+    }
+    mpu6050_read_raw(acceleration, gyro) ;
+
+    float acc_y = fix2float15(acceleration[1]) ;
+    float acc_z = fix2float15(acceleration[2]) ;
+    float initial_angle = atan2f(acc_z, acc_y) * (180.0 / M_PI) - 90.0 ;
+
+    comp_angle_roll = initial_angle ;
+    prev_angle = initial_angle ;
+    integral_term = 0.0 ;
+    filt_control = pwm_neut ;
 
     ////////////////////////////////////////////////////////////////////////
     ///////////////////////// PWM CONFIGURATION ////////////////////////////
