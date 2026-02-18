@@ -21,3 +21,10 @@ You may also be interested in some meta-information about this class:
 > - [What makes a good laboratory exercise?](https://vanhunteradams.com/Pico/CourseMaterials/Lab_Criteria.html)
 > - [Hunter's teaching philosophy](https://vanhunteradams.com/Professional/Teaching.pdf)
 > - [Hunter's love letter to embedded systems](https://www.youtube.com/watch?v=-TFsfcIx04Q)
+
+## How I run the demos:
+    Using Blinky Demo as an Example:
+    1. Add a copy of pico_sdk_import.cmake to the folder so that is appears as 'Hunter-Adams-RP2040-Demos/Basic_Demos/Blinky_Demo/pico_sdk_import.cmake'.
+    2. Add a build directory and cd into it.
+    3. Run make -j4
+    4. Copy over the Blinky.uf2 file to the pico.
