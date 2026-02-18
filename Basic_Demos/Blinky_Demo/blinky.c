@@ -2,122 +2,26 @@
  * V. Hunter Adams (vha3@cornell.edu)
  */
 
-#include <math.h>
-#include <stdio.h>
 #include "pico/stdlib.h"
 
 // The LED is connected to GPIO 25
 #define LED_PIN 25
 
-#define BIT(n)  (1u<<(n))
-uint32_t gpio_bitmask = BIT(9) | BIT(8) | BIT(7) | BIT(6) | BIT(5) | BIT(4) | BIT(3) | BIT(2) | BIT(1) | BIT(0);
-
-// Number of samples in the waveform lookup table
-#define SINE_TABLE_SIZE 256
-// Delay between samples in microseconds (adjust for desired frequency)
-#define SAMPLE_DELAY_US 1000
-
-// Sine wave lookup table (pre-calulated for 8-bit resolution)
-uint8_t sine_wave_table[SINE_TABLE_SIZE];
-
-// Function to set the 8-bit value to the DAC pins
-void set_dac_value(uint8_t value) {
-    gpio_set_mask(gpio_bitmask & 0x0ff & value);
-    busy_wait_us(1);
-    gpio_set_mask(gpio_bitmask & 0x300);
-    busy_wait_us(1);
-    gpio_clr_mask(gpio_bitmask & 0x0ff);
-    gpio_clr_mask(gpio_bitmask & 0x300);
-    busy_wait_us(1);
-}
-
-
 // Main (runs on core 0)
 int main() {
-    stdio_init_all();
-    
     // Initialize the LED pin
-    // gpio_init(LED_PIN);
-
-    // Initialize the GPIO pins used
-    gpio_init_mask(gpio_bitmask);
-
+    gpio_init(LED_PIN);
     // Configure the LED pin as an output
-    // gpio_set_dir(LED_PIN, GPIO_OUT);
-
-    // Configure GPIO pins as outputs
-    gpio_set_dir_out_masked(gpio_bitmask);
-
-    // Pre-calculate sine wave values for the lookup table
-    for (int i = 0; i < SINE_TABLE_SIZE; i++) {
-        sine_wave_table[i] = (uint8_t)(127 * sin((float)i * 2 * M_PI / SINE_TABLE_SIZE) + 128);
-    }
-
-    int current_sample_index = 0;
-
+    gpio_set_dir(LED_PIN, GPIO_OUT);
     // Loop
     while (true) {
-        printf("Hello, world!\n"); 
         // Set high
-        // gpio_put(LED_PIN, 1);
+        gpio_put(LED_PIN, 1);
         // Sleep
-        // sleep_ms(250);
+        sleep_ms(250);
         // Set low
-        // gpio_put(LED_PIN, 0);
+        gpio_put(LED_PIN, 0);
         // Sleep
-        // sleep_ms(250);
-
-        // Output the current sample to the DAC
-        set_dac_value(sine_wave_table[current_sample_index]);
-
-        // Move to the next sample, wrapping around if needed
-        current_sample_index = (current_sample_index + 1) % SINE_TABLE_SIZE;
-
-        // Delay to control the output frequency
-        sleep_us(SAMPLE_DELAY_US);
-
-        /*
-        for (uint32_t i = 0; i <= 255; i++) {
-            // Set GPIO pins corresponding to 8 bit data
-            // gpio_put_masked(gpio_bitmask & 0x0ff, i);
-            gpio_set_mask(gpio_bitmask & 0x0ff & i);
-            busy_wait_us(1);
-            // gpio_set_mask(gpio_bitmask & 0x0ff & i);
-            // Drive HIGH {GPIO9, GPIO8} --> {NOTWR, NOTCS}
-            // gpio_put_masked(gpio_bitmask & 0x300, 0x300);
-            gpio_set_mask(gpio_bitmask & 0x300);
-            busy_wait_us(5);
-            // gpio_put_masked(gpio_bitmask & 0x0ff, 0);
-            // gpio_put_masked(gpio_bitmask & 0x300, 0x000);
-            // gpio_clr_mask(gpio_bitmask & 0x300);
-            gpio_clr_mask(gpio_bitmask & 0x0ff);
-            gpio_clr_mask(gpio_bitmask & 0x300);
-
-            busy_wait_us(1);
-        }
-
-        busy_wait_us(5);
-        
-        
-        for (uint32_t i = 255; i >= 0; i--) {
-            // Set GPIO pins corresponding to 8 bit data
-            // gpio_put_masked(gpio_bitmask & 0x0ff, i);
-            gpio_set_mask(gpio_bitmask & 0x0ff & i);
-            busy_wait_us(1);
-            // Drive HIGH {GPIO9, GPIO8} --> {NOTWR, NOTCS}
-            // gpio_put_masked(gpio_bitmask & 0x300, 0x300);
-            gpio_set_mask(gpio_bitmask & 0x300);
-            busy_wait_us(5);
-            gpio_put_masked(gpio_bitmask & 0x300, 0x000);
-            
-            gpio_clr_mask(gpio_bitmask & 0x0ff);
-            gpio_clr_mask(gpio_bitmask & 0x300);
-
-            busy_wait_us(1);
-        }
-
-        busy_wait_us(5);
-        */
-
+        sleep_ms(250);
     }
 }

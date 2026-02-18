@@ -14,8 +14,6 @@ add_executable(Blinky)
 
 target_sources(Blinky PRIVATE blinky.c)
 
-pico_enable_stdio_usb(Blinky 1)
-
 # Pull in our pico_stdlib which pulls in commonly used features
 target_link_libraries(Blinky pico_stdlib pico_bootsel_via_double_reset)
 
