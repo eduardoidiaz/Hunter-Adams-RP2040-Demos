@@ -1,0 +1,161 @@
+/**
+ * V. Hunter Adams (vha3@cornell.edu)
+ */
+
+#include "pico/stdlib.h"
+
+#define BIT(n)  (1u<<(n))
+uint32_t gpio_bitmask = BIT(22) | BIT(21) | BIT(16) | BIT(15) | BIT(14);
+
+// The LED is connected to GPIO 25
+#define LED_PIN 25
+
+#define DB7 0
+#define DB6 1
+#define DB5 2
+#define DB4 3
+#define DB3 4
+#define DB2 5
+#define DB1 6
+#define DB0 7
+#define NOTCS 8
+#define NOTWR 9
+
+// Main (runs on core 0)
+int main() {
+    // Initialize the LED pin
+    gpio_init(LED_PIN);
+    gpio_init(DB7);
+    gpio_init(DB6);
+    gpio_init(DB5);
+    gpio_init(DB4);
+    gpio_init(DB3);
+    gpio_init(DB2);
+    gpio_init(DB1);
+    gpio_init(DB0);
+    gpio_init(NOTCS);
+    gpio_init(NOTWR);
+
+    // Configure the LED pin as an output
+    gpio_set_dir(LED_PIN, GPIO_OUT);
+    gpio_set_dir(DB7, GPIO_OUT);
+    gpio_set_dir(DB6, GPIO_OUT);
+    gpio_set_dir(DB5, GPIO_OUT);
+    gpio_set_dir(DB4, GPIO_OUT);
+    gpio_set_dir(DB3, GPIO_OUT);
+    gpio_set_dir(DB2, GPIO_OUT);
+    gpio_set_dir(DB1, GPIO_OUT);
+    gpio_set_dir(DB0, GPIO_OUT);
+    gpio_set_dir(NOTCS, GPIO_OUT);
+    gpio_set_dir(NOTWR, GPIO_OUT);
+
+    // Loop
+    while (true) {
+        // Set high
+        //gpio_put(LED_PIN, 1);
+        // Sleep
+        // sleep_ms(1000);
+        // Set low
+        // gpio_put(LED_PIN, 0);
+        // Sleep
+        // sleep_ms(1000);
+
+        // sleep_ms(10);
+
+        // Load data = 0
+        gpio_put(DB0, 0);
+        gpio_put(DB1, 0);
+        gpio_put(DB2, 0);
+        gpio_put(DB3, 0);
+        gpio_put(DB4, 0);
+        gpio_put(DB5, 0);
+        gpio_put(DB6, 0);
+        gpio_put(DB7, 0);
+        gpio_put(NOTCS, 1);
+        gpio_put(NOTWR, 1);
+
+        // sleep_ms(1);
+
+        gpio_put(NOTCS, 0);
+        gpio_put(NOTWR, 0);
+
+        // sleep_ms(5);
+
+        // Load data = 63
+        gpio_put(DB0, 1);
+        gpio_put(DB1, 1);
+        gpio_put(DB2, 1);
+        gpio_put(DB3, 1);
+        gpio_put(DB4, 1);
+        gpio_put(DB5, 1);
+        gpio_put(DB6, 0);
+        gpio_put(DB7, 0);
+        gpio_put(NOTCS, 1);
+        gpio_put(NOTWR, 1);
+
+        // sleep_ms(1);
+
+        gpio_put(NOTCS, 0);
+        gpio_put(NOTWR, 0);
+
+        // sleep_ms(5);
+
+        // Load data = 127
+        gpio_put(DB0, 1);
+        gpio_put(DB1, 1);
+        gpio_put(DB2, 1);
+        gpio_put(DB3, 1);
+        gpio_put(DB4, 1);
+        gpio_put(DB5, 1);
+        gpio_put(DB6, 1);
+        gpio_put(DB7, 0);
+        gpio_put(NOTCS, 1);
+        gpio_put(NOTWR, 1);
+
+        sleep_ms(1);
+
+        gpio_put(NOTCS, 0);
+        gpio_put(NOTWR, 0);
+
+        sleep_ms(5);
+
+        // Load data = 191
+        gpio_put(DB0, 1);
+        gpio_put(DB1, 1);
+        gpio_put(DB2, 1);
+        gpio_put(DB3, 1);
+        gpio_put(DB4, 1);
+        gpio_put(DB5, 1);
+        gpio_put(DB6, 0);
+        gpio_put(DB7, 1);
+        gpio_put(NOTCS, 1);
+        gpio_put(NOTWR, 1);
+
+        // sleep_ms(1);
+
+        gpio_put(NOTCS, 0);
+        gpio_put(NOTWR, 0);
+
+        // sleep_ms(5);
+
+        // Load data = 255
+        gpio_put(DB0, 1);
+        gpio_put(DB1, 1);
+        gpio_put(DB2, 1);
+        gpio_put(DB3, 1);
+        gpio_put(DB4, 1);
+        gpio_put(DB5, 1);
+        gpio_put(DB6, 1);
+        gpio_put(DB7, 1);
+        gpio_put(NOTCS, 1);
+        gpio_put(NOTWR, 1);
+
+        // sleep_ms(1);
+
+        gpio_put(NOTCS, 0);
+        gpio_put(NOTWR, 0);
+
+        // sleep_ms(5);
+
+    }
+}
