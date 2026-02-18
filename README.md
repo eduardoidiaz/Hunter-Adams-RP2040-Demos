@@ -25,6 +25,8 @@ You may also be interested in some meta-information about this class:
 ## How I run the demos:
     Using Blinky Demo as an Example:
     1. Add a copy of pico_sdk_import.cmake to the folder so that is appears as 'Hunter-Adams-RP2040-Demos/Basic_Demos/Blinky_Demo/pico_sdk_import.cmake'.
-    2. Add a build directory and cd into it.
-    3. Run make -j4
-    4. Copy over the Blinky.uf2 file to the pico.
+    2. Add a 'build' directory and cd into it.
+    3. 'export PICO_SDK_PATH=../../../../pico-sdk'
+    4. Run 'cmake ..'
+    5. Run 'make -j4'
+    6. Copy over the Blinky.uf2 file to the pico.
