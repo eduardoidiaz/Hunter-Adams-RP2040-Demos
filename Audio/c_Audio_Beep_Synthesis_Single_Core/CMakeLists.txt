@@ -14,6 +14,9 @@ add_executable(Audio_Beep_Synth_Single_Core)
 
 target_sources(Audio_Beep_Synth_Single_Core PRIVATE beep_beep.c)
 
+# enable usb output
+pico_enable_stdio_usb(Audio_Beep_Synth_Single_Core 1)
+
 # Add pico_multicore which is required for multicore functionality
 target_link_libraries(Audio_Beep_Synth_Single_Core pico_stdlib pico_bootsel_via_double_reset hardware_spi hardware_sync)
 

@@ -12,6 +12,9 @@ pico_sdk_init()
 
 add_executable(Keypad)
 
+# enable usb output
+pico_enable_stdio_usb(Keypad 1)
+
 # must match with pio filename and executable name from above
 pico_generate_pio_header(Keypad ${CMAKE_CURRENT_LIST_DIR}/hsync.pio)
 pico_generate_pio_header(Keypad ${CMAKE_CURRENT_LIST_DIR}/vsync.pio)
